@@ -1,0 +1,6 @@
+Running Isaac Teleop [36m1.0.193[0m, CloudXR Runtime [36m6.1.0[0m
+CloudXR runtime:   [36mrunning[0m, log file: [90m/home/whf/.cloudxr/logs/cxr_server.2026-07-03T133758Z.log[0m
+CloudXR WSS proxy: [36mrunning[0m, log file: [90m/home/whf/.cloudxr/logs/wss.2026-07-03T133758Z.log[0m
+Activate CloudXR environment in another terminal: [1;32msource /home/whf/.cloudxr/run/cloudxr.env[0m
+[33mKeep this terminal open, Ctrl+C to terminate.[0m
+Stopped.

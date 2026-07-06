@@ -24,6 +24,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BOTTLE_GLB = REPO_ROOT / "assets" / "bottle.glb"
 DEFAULT_OUTPUT = REPO_ROOT / "debug" / "dynamic_bottle_body.json"
 SPEC_FORMAT = "newton_dynamic_bottle_v1"
+BOTTLE_CONTACT_MARGIN_M = 0.0
+BOTTLE_CONTACT_GAP_M = 1.0e-4
+BOTTLE_CONTACT_TORSIONAL_FRICTION = 0.02
+BOTTLE_CONTACT_ROLLING_FRICTION = 0.002
+BOTTLE_CONTACT_KE = 6.0e3
+BOTTLE_CONTACT_KD = 1.2e3
+BOTTLE_CONTACT_KF = 2.0e2
 
 
 @dataclass
@@ -263,14 +270,17 @@ def _shape_cfg(
     cfg.density = float(density)
     cfg.mu = float(friction)
     cfg.restitution = 0.0
-    cfg.mu_torsional = 0.01
-    cfg.mu_rolling = 0.001
-    cfg.ke = 5.0e4
-    cfg.kd = 5.0e2
-    cfg.kf = 1.0e3
+    cfg.mu_torsional = BOTTLE_CONTACT_TORSIONAL_FRICTION
+    cfg.mu_rolling = BOTTLE_CONTACT_ROLLING_FRICTION
+    cfg.ke = BOTTLE_CONTACT_KE
+    cfg.kd = BOTTLE_CONTACT_KD
+    cfg.kf = BOTTLE_CONTACT_KF
     cfg.is_visible = bool(visible)
     cfg.has_shape_collision = bool(colliding)
     cfg.has_particle_collision = bool(colliding)
+    if colliding:
+        cfg.margin = BOTTLE_CONTACT_MARGIN_M
+        cfg.gap = BOTTLE_CONTACT_GAP_M
     if not colliding:
         cfg.collision_group = 0
     return cfg
@@ -536,7 +546,7 @@ class Example:
         if updated:
             self.spec.mass = value
             changed = True
-        updated, value = imgui.slider_float("Friction", float(self.spec.friction), 0.0, 2.0, "%.3f")
+        updated, value = imgui.slider_float("Friction", float(self.spec.friction), 0.0, 8.0, "%.3f")
         if updated:
             self.spec.friction = value
             changed = True
@@ -565,15 +575,15 @@ class Example:
         parser.add_argument("--save-spec", action="store_true", help="Write the current spec immediately after startup.")
         parser.add_argument("--radius", type=_positive_float, default=None, help="Initial cylinder radius [m].")
         parser.add_argument("--height", type=_positive_float, default=None, help="Initial cylinder height [m].")
-        parser.add_argument("--fit-margin", type=float, default=0.005, help="Extra envelope margin around the GLB [m].")
+        parser.add_argument("--fit-margin", type=float, default=-0.001, help="Extra envelope margin around the GLB [m].")
         parser.add_argument("--pos-x", type=float, default=0.42, help="Initial body X position [m].")
         parser.add_argument("--pos-y", type=float, default=0.07, help="Initial body Y position [m].")
         parser.add_argument("--pos-z", type=float, default=-0.57, help="Initial body Z position [m].")
         parser.add_argument("--roll", type=float, default=-90.0, help="Initial body roll [deg].")
         parser.add_argument("--pitch", type=float, default=0.0, help="Initial body pitch [deg].")
         parser.add_argument("--yaw", type=float, default=0.0, help="Initial body yaw [deg].")
-        parser.add_argument("--mass", type=_positive_float, default=0.12, help="Dynamic bottle mass [kg].")
-        parser.add_argument("--friction", type=float, default=1.0, help="Cylinder collision friction coefficient.")
+        parser.add_argument("--mass", type=_positive_float, default=0.22, help="Dynamic bottle mass [kg].")
+        parser.add_argument("--friction", type=float, default=3.0, help="Cylinder collision friction coefficient.")
         parser.add_argument("--gravity", type=float, default=-9.81, help="Gravity acceleration along Z [m/s^2].")
         parser.add_argument("--fps", type=float, default=60.0, help="Viewer frame rate [Hz].")
         parser.add_argument("--add-ground", action=argparse.BooleanOptionalAction, default=True, help="Add a ground plane.")

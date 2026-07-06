@@ -1,0 +1,43 @@
+[cloudxr-web] ok: docker daemon is accessible
+[cloudxr-web] ok: imported image=cloudxr-web-app:latest
+[cloudxr-web] ok: imported webxr_client=/home/whf/.cache/teleop_stack/cloudxr_web_client_remote/webxr_client
+[cloudxr-web] ok: CloudXR env: /home/whf/.cloudxr/run/cloudxr.env
+[cloudxr-web] ok: CloudXR web overlay applied
+[cloudxr-web] ok: open this in Quest: https://192.168.8.100:8443/
+[cloudxr-web] 48322 is only for certificate/WSS. If needed, accept: https://192.168.8.100:48322/
+[cloudxr-web] starting imported CloudXR Web Client image; press Ctrl+C to stop
+<i> [webpack-dev-server] [HPM] Proxy created: /quest-voice  -> ws://127.0.0.1:8766
+<i> [webpack-dev-server] Project is running at:
+<i> [webpack-dev-server] Loopback: https://localhost:8443/, https://[::1]:8443/
+<i> [webpack-dev-server] On Your Network (IPv4): https://192.168.8.100:8443/
+<i> [webpack-dev-server] On Your Network (IPv6): https://[fd7a:115c:a1e0::a63b:bb26]:8443/
+<i> [webpack-dev-server] Content not from webpack is served from '/app/webxr_client/build, /app/webxr_client/public' directory
+assets by status 17.8 MiB [cached] 9 assets
+assets by path npm/@webxr-input-profiles/assets@1.0.19/dist/profiles/ 9.08 MiB 23 assets
+assets by path *.svg 2.15 KiB
+  asset arrow-left-start-on-rectangle.svg 556 bytes [compared for emit] [from: public/arrow-left-start-on-rectangle.svg] [copied]
+  asset controller-icons.svg 430 bytes [compared for emit] [from: public/controller-icons.svg] [copied]
+  asset stop-circle.svg 430 bytes [compared for emit] [from: public/stop-circle.svg] [copied]
+  asset play-circle.svg 402 bytes [compared for emit] [from: public/play-circle.svg] [copied]
+  asset arrow-uturn-left.svg 380 bytes [compared for emit] [from: public/arrow-uturn-left.svg] [copied]
+assets by status 35.7 MiB [emitted]
+  asset bundle.63b05884.js 35.7 MiB [emitted] [immutable] (name: main)
+  asset index.html 33.3 KiB [emitted] [compared for emit]
+asset favicon.ico 13.9 KiB [compared for emit] [from: favicon.ico] [copied]
+asset HEROICONS_LICENSE 1.05 KiB [compared for emit] [from: public/HEROICONS_LICENSE] [copied]
+cached modules 22 MiB (javascript) 40.9 KiB (asset) [cached] 2302 modules
+runtime modules 33.1 KiB 17 modules
+./src/BuildInfoOverlay.tsx 1.5 KiB [built] [code generated]
+webpack 5.107.2 compiled successfully in 3467 ms
+<i> [webpack-dev-server] [HPM] Upgrading to WebSocket
+(node:21) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+<i> [webpack-dev-server] [HPM] Client disconnected
+<e> [webpack-dev-server] [HPM] WebSocket error: Error: read EHOSTUNREACH
+<e>     at TLSWrap.onStreamRead (node:internal/stream_base_commons:216:20) {
+<e>   errno: -113,
+<e>   code: 'EHOSTUNREACH',
+<e>   syscall: 'read'
+<e> }
+
+got 3 SIGTERM/SIGINTs, forcefully exiting

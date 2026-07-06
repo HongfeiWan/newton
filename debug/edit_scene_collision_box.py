@@ -372,7 +372,7 @@ class Example:
                 changed = True
 
         imgui.separator()
-        updated, value = imgui.slider_float("Friction", float(self.spec.friction), 0.0, 2.0, "%.3f")
+        updated, value = imgui.slider_float("Friction", float(self.spec.friction), 0.0, 15.0, "%.3f")
         if updated:
             self.spec.friction = value
             changed = True
@@ -417,7 +417,7 @@ class Example:
         parser.add_argument("--box-roll", type=float, default=0.0, help="Box roll in scene frame [deg].")
         parser.add_argument("--box-pitch", type=float, default=0.0, help="Box pitch in scene frame [deg].")
         parser.add_argument("--box-yaw", type=float, default=0.0, help="Box yaw in scene frame [deg].")
-        parser.add_argument("--friction", type=float, default=1.0, help="Collision box friction coefficient.")
+        parser.add_argument("--friction", type=float, default=10.0, help="Collision box friction coefficient.")
         parser.add_argument("--box-visible", action=argparse.BooleanOptionalAction, default=False, help="Save box as visible in the runtime model.")
         parser.add_argument("--fps", type=float, default=60.0, help="Viewer frame rate [Hz].")
         return parser

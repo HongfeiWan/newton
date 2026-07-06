@@ -2,7 +2,7 @@
   "body": {
     "dynamic": true,
     "gravity": true,
-    "mass": 0.12,
+    "mass": 0.22,
     "position": [
       0.42,
       0.07,
@@ -15,15 +15,15 @@
     ]
   },
   "collision": {
-    "friction": 1.0,
-    "height": 0.09470000118017197,
-    "radius": 0.032099999487400055,
+    "friction": 3.0,
+    "height": 0.1953652350716293,
+    "radius": 0.03258821510402659,
     "type": "cylinder"
   },
   "format": "newton_dynamic_bottle_v1",
   "visual": {
     "collision_enabled": false,
-    "fit_margin": 0.005,
+    "fit_margin": -0.001,
     "local_position": [
       0.003410077653825283,
       -0.00304920598864556,

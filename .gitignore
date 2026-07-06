@@ -78,10 +78,12 @@ docs/_static/viser/
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
 
-assets/
+
 
 # Local debug artifacts and large scene assets
 /scene/*.glb
+*.[sS][tT][lL]
+*.STL
 /humanoid_recording.bin
 /my_output.usd
 /solver_convergence.png

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ DEFAULT_HARNESS_ROOT = Path("/home/whf/Project/harness")
 DEFAULT_D455_JSON = DEFAULT_HARNESS_ROOT / "assets" / "d455json.json"
 DEFAULT_D405_JSON = REPO_ROOT / "assets" / "d405json.json"
 DEFAULT_D405_MOUNT_JSON = REPO_ROOT / "assets" / "d405_mount_default.json"
+DEFAULT_OVERLAY_HAND_TRACE_PATH = REPO_ROOT / "logs" / "xr_debug" / "camera_overlay_hand.jsonl"
 URDF_UP_AXIS = "Z"
 D455_BODY_LABEL_SUFFIX = "/d455_body"
 D455_BODY_SIZE_FALLBACK = (0.026, 0.124, 0.029)
@@ -67,12 +69,15 @@ INITIAL_RIGHT_ARM_Q = (
     -0.11129964639967839,
     0.11606439525762292,
 )
-L10_CONTACT_FRICTION = 2.5
-L10_CONTACT_TORSIONAL_FRICTION = 0.05
-L10_CONTACT_ROLLING_FRICTION = 0.01
-L10_CONTACT_KE = 2.0e5
-L10_CONTACT_KD = 2.0e3
-L10_CONTACT_KF = 5.0e3
+DEFAULT_RIGID_GAP_M = 1.0e-4
+L10_CONTACT_FRICTION = 0.45
+L10_CONTACT_TORSIONAL_FRICTION = 0.0
+L10_CONTACT_ROLLING_FRICTION = 0.0
+L10_CONTACT_KE = 8.0e3
+L10_CONTACT_KD = 1.5e3
+L10_CONTACT_KF = 2.5e2
+L10_CONTACT_MARGIN_M = 0.0
+L10_CONTACT_GAP_M = 1.0e-4
 BOTTLE_SCENE_COLLISION_CLEARANCE_M = 0.002
 
 
@@ -165,6 +170,8 @@ def _filter_urdf_collisions_to_l10_hand(
             builder.shape_material_kf[shape_index] = float(l10_kf)
             builder.shape_material_mu_torsional[shape_index] = float(l10_mu_torsional)
             builder.shape_material_mu_rolling[shape_index] = float(l10_mu_rolling)
+            builder.shape_margin[shape_index] = L10_CONTACT_MARGIN_M
+            builder.shape_gap[shape_index] = L10_CONTACT_GAP_M
             kept_l10 += 1
             continue
 
@@ -177,6 +184,8 @@ def _filter_urdf_collisions_to_l10_hand(
         f" disabled_non_l10_shapes={disabled_non_l10}"
         f" l10_mu={l10_friction:g}"
         f" l10_ke={l10_ke:g}"
+        f" margin={L10_CONTACT_MARGIN_M:g}"
+        f" gap={L10_CONTACT_GAP_M:g}"
     )
 
 
@@ -272,6 +281,41 @@ def _vec3(value: str) -> tuple[float, float, float]:
         return tuple(float(part) for part in parts)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("expected numeric x,y,z") from exc
+
+
+def _axis_map(value: str) -> tuple[str, str, str]:
+    parts = tuple(part.strip() for part in str(value).split(",") if part.strip())
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("expected three comma-separated axis tokens")
+    for token in parts:
+        raw = token[1:] if token.startswith(("-", "+")) else token
+        if raw not in {"x", "y", "z"}:
+            raise argparse.ArgumentTypeError(f"unsupported axis token: {token!r}")
+    return parts  # type: ignore[return-value]
+
+
+def _normalize_axis_map(value: str | tuple[str, str, str]) -> tuple[str, str, str]:
+    if isinstance(value, tuple):
+        return value
+    return _axis_map(value)
+
+
+def _vec4(value: str) -> tuple[float, float, float, float]:
+    parts = tuple(part.strip() for part in str(value).split(",") if part.strip())
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("expected four comma-separated values")
+    try:
+        return tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected numeric values") from exc
+
+
+def _default_voice_control_port() -> int:
+    for name in ("TELEOP_QUEST_VOICE_UDP_PORT", "TELEOP_VOICE_UDP_PORT"):
+        raw_value = os.environ.get(name)
+        if raw_value:
+            return int(raw_value)
+    return 9910
 
 
 def _vec7(value: str) -> tuple[float, float, float, float, float, float, float]:
@@ -914,9 +958,18 @@ class Example:
         self.camera_sensor = None
         self.d455_preview: CameraPreview | None = None
         self.d405_preview: CameraPreview | None = None
+        self.teleop_session = None
+        self.teleop_robot = None
+        self.teleop_voice_policy = None
+        self.teleop_xr_status_publisher = None
+        self.teleop_mode = "ready"
+        self.teleop_last_event = "session_created"
+        self.teleop_exit_requested = False
+        self._teleop_session_entered = False
 
         urdf_path = _resolve_urdf(args.urdf)
         builder = newton.ModelBuilder(up_axis=URDF_UP_AXIS, gravity=args.gravity)
+        builder.rigid_gap = float(args.rigid_gap)
         builder.default_joint_cfg.armature = args.armature
         builder.default_joint_cfg.target_ke = args.target_ke
         builder.default_joint_cfg.target_kd = args.target_kd
@@ -1026,6 +1079,7 @@ class Example:
                 "Loaded dynamic bottle:"
                 f" spec={self.dynamic_bottle_spec_path}"
                 f" visual={dynamic_bottle_spec.visual_glb}"
+                f" scene_pos={np.round(self.bottle_pos, 6).tolist()}"
                 f" body_pos={np.round(dynamic_bottle_spec.pos, 6).tolist()}"
                 f" body_rpy={np.round(dynamic_bottle_spec.rpy_deg, 6).tolist()}"
                 f" radius={dynamic_bottle_spec.radius:g}"
@@ -1046,13 +1100,19 @@ class Example:
         self.control = self.model.control()
         self.contacts = self.model.contacts()
         self.solver = (
-            newton.solvers.SolverXPBD(self.model, iterations=args.solver_iterations)
+            newton.solvers.SolverXPBD(
+                self.model,
+                iterations=args.solver_iterations,
+                rigid_contact_relaxation=float(args.rigid_contact_relaxation),
+                angular_damping=float(args.angular_damping),
+            )
             if self.simulate_enabled
             else None
         )
 
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
         _assert_finite_state(self.state_0, "Initial FK")
+        self._capture_initial_state_snapshot()
         _print_model_summary(self.model)
 
         self.viewer.set_model(self.model)
@@ -1061,8 +1121,13 @@ class Example:
 
         self.setup_camera_previews(args)
 
-        if self.simulate_enabled and args.capture_graph:
+        if args.quest_teleop:
+            self.setup_quest_teleop(args)
+
+        if self.simulate_enabled and args.capture_graph and not args.quest_teleop:
             self.capture()
+        elif args.quest_teleop and args.capture_graph:
+            print("Quest teleop enabled: CUDA graph capture disabled for live joint-state edits.")
 
     def _bottle_world_pose(self) -> tuple[np.ndarray, np.ndarray]:
         scene_rotation = _rotation_from_euler_deg(tuple(self.scene_rpy_deg))
@@ -1073,6 +1138,52 @@ class Example:
         bottle_world_pos = scene_pos + scene_rotation @ (bottle_rel_pos * scene_scale)
         bottle_world_rotation = scene_rotation @ bottle_rotation
         return bottle_world_pos, bottle_world_rotation
+
+    def _capture_initial_state_snapshot(self) -> None:
+        self._initial_joint_q = self.model.joint_q.numpy().copy()
+        self._initial_joint_qd = self.model.joint_qd.numpy().copy()
+        self._initial_body_q = self.state_0.body_q.numpy().copy()
+        self._initial_body_qd = self.state_0.body_qd.numpy().copy()
+
+    def reset_scene_to_initial(self) -> None:
+        if not all(
+            hasattr(self, name)
+            for name in ("_initial_joint_q", "_initial_joint_qd", "_initial_body_q", "_initial_body_qd")
+        ):
+            return
+
+        joint_q = wp.array(self._initial_joint_q.copy(), dtype=wp.float32, device=self.model.device)
+        joint_qd = wp.array(self._initial_joint_qd.copy(), dtype=wp.float32, device=self.model.device)
+        body_q = wp.array(self._initial_body_q.copy(), dtype=wp.transform, device=self.model.device)
+        body_qd = wp.array(self._initial_body_qd.copy(), dtype=wp.spatial_vector, device=self.model.device)
+
+        self.model.joint_q = joint_q
+        self.model.joint_qd = joint_qd
+        self.state_0.joint_q = joint_q
+        self.state_0.joint_qd = joint_qd
+        self.state_0.body_q = body_q
+        self.state_0.body_qd = body_qd
+        self.state_1.joint_q = wp.clone(joint_q)
+        self.state_1.joint_qd = wp.clone(joint_qd)
+        self.state_1.body_q = wp.clone(body_q)
+        self.state_1.body_qd = wp.clone(body_qd)
+        self.state_0.clear_forces()
+        self.state_1.clear_forces()
+
+        self.control.clear()
+        self.control.joint_target_q = wp.clone(joint_q)
+        self.control.joint_target_qd = wp.clone(joint_qd)
+        self.contacts = self.model.contacts()
+        self.model.bvh_refit_shapes(self.state_0)
+        if self.model.particle_count:
+            self.model.bvh_refit_particles(self.state_0)
+        self.sim_time = 0.0
+
+        if self.teleop_robot is not None and hasattr(self.teleop_robot, "reset_to_scene_state"):
+            self.teleop_robot.reset_to_scene_state()
+        elif self.teleop_robot is not None and hasattr(self.teleop_robot, "reset_relative_anchor"):
+            self.teleop_robot.reset_relative_anchor()
+        print("[newton-quest-teleop] scene reset to initial state", flush=True)
 
     def capture(self) -> None:
         if wp.get_device().is_cuda:
@@ -1097,6 +1208,20 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self) -> None:
+        if self.teleop_voice_policy is not None:
+            if self._apply_teleop_voice_events(self.teleop_voice_policy.update()):
+                print("[newton-quest-teleop] voice exit requested", flush=True)
+                self.teleop_exit_requested = True
+
+        self._publish_teleop_xr_status()
+
+        if self.teleop_exit_requested and hasattr(self.viewer, "close"):
+            self.viewer.close()
+            return
+
+        if self.teleop_session is not None:
+            self.teleop_session.step()
+
         if not self.simulate_enabled:
             self.sim_time += self.frame_dt
             return
@@ -1107,6 +1232,183 @@ class Example:
             self.simulate()
 
         self.sim_time += self.frame_dt
+
+    def setup_quest_teleop(self, args) -> None:
+        from teleop_stack.robots.newton_runtime import NewtonRuntimeRobotConfig, NewtonRuntimeRobotInterface
+        from teleop_stack.robots.nero_runtime import NeroTeleopMappingConfig
+        from teleop_stack.session.overlay_hand_log_session import OverlayHandLogSession, OverlayHandLogSessionConfig
+        from teleop_stack.session.quest_session import QuestRobotSession, QuestRobotSessionConfig
+        from teleop_stack.session.voice_controls import VoiceTeleopControlConfig, VoiceTeleopControlPolicy
+        from teleop_stack.session.xr_status import XrTeleopStatusPublisher
+
+        axis_map = _normalize_axis_map(args.teleop_input_axis_map)
+        mapping = NeroTeleopMappingConfig(
+            translation_scale_xyz=tuple(float(v) for v in args.teleop_translation_scale),
+            workspace_origin_xyz=tuple(float(v) for v in args.teleop_workspace_origin),
+            input_axis_map=axis_map,  # type: ignore[arg-type]
+            openxr_coordinate_adapter=args.teleop_openxr_coordinate_adapter,
+            use_teleop_orientation=bool(args.teleop_orientation),
+            fixed_quaternion_wxyz=args.teleop_fixed_quaternion_wxyz,
+            orientation_axis_map=args.teleop_orientation_axis_map,
+            orientation_max_speed_rad_s=float(args.teleop_orientation_max_speed_rad_s),
+            orientation_tool_offset_wxyz=args.teleop_orientation_tool_offset_wxyz,
+            orientation_reference_mode=args.teleop_orientation_reference_mode,
+            orientation_source=args.teleop_orientation_source,
+        )
+        robot = NewtonRuntimeRobotInterface(
+            self,
+            NewtonRuntimeRobotConfig(
+                arm_side=args.teleop_arm_side,
+                drive_ik=bool(args.teleop_drive_ik),
+                relative_control=bool(args.teleop_relative_control),
+                eef_body_suffix_by_side={
+                    "left": str(args.teleop_left_eef_body_suffix),
+                    "right": str(args.teleop_right_eef_body_suffix),
+                },
+                openxr_yaw_recenter=bool(args.teleop_openxr_yaw_recenter),
+                finite_difference_rad=float(args.teleop_finite_difference_rad),
+                hand_max_joint_step_rad=float(args.teleop_hand_max_joint_step_rad),
+                hand_publish_kinematic_velocity=bool(args.teleop_hand_publish_kinematic_velocity),
+                mapping=mapping,
+                ik_config_overrides={
+                    "max_task_step_m": float(args.teleop_ik_max_task_step_m),
+                    "max_rotation_step_rad": float(args.teleop_ik_max_rotation_step_rad),
+                    "orientation_weight": float(args.teleop_ik_orientation_weight),
+                    "max_joint_step_rad": float(args.teleop_ik_max_joint_step_rad),
+                    "max_joint_velocity_rad_s": float(args.teleop_ik_max_joint_velocity_rad_s),
+                    "damping_lambda": float(args.teleop_ik_damping_lambda),
+                },
+            ),
+            print_every_n=args.teleop_print_every_n_frames,
+        )
+        self.teleop_robot = robot
+        self.teleop_mode = "ready" if args.teleop_require_engage else "engaged"
+        self.teleop_last_event = "session_started"
+        robot.set_command_gate(
+            self.teleop_mode == "engaged",
+            mode=self.teleop_mode,
+            last_event=self.teleop_last_event,
+        )
+        if args.teleop_input_source == "overlay-log":
+            self.teleop_session = OverlayHandLogSession(
+                OverlayHandLogSessionConfig(
+                    trace_path=str(args.teleop_overlay_hand_log_path),
+                    arm_side=args.teleop_arm_side,
+                    hand_side=args.teleop_arm_side,
+                    use_teleop_orientation=args.teleop_arm_pose_command_mode == "raw_wrist_position_full_orientation",
+                    loop_hz=float(args.teleop_loop_hz),
+                    print_every_n_frames=int(args.teleop_print_every_n_frames),
+                    stale_after_s=float(args.teleop_overlay_stale_after_s),
+                    teleop_trace_path=args.teleop_trace_path,
+                ),
+                robot,
+            )
+        else:
+            self.teleop_session = QuestRobotSession(
+                QuestRobotSessionConfig(
+                    app_name=args.teleop_app_name,
+                    arm_side=args.teleop_arm_side,
+                    pose_input_mode=args.teleop_pose_input_mode,
+                    arm_pose_command_mode=args.teleop_arm_pose_command_mode,
+                    fixed_arm_orientation_xyzw=args.teleop_fixed_arm_orientation_xyzw,
+                    use_wrist_position_for_hand=bool(args.teleop_use_wrist_position_for_hand),
+                    use_wrist_rotation_for_hand=bool(args.teleop_use_wrist_rotation_for_hand),
+                    palm_plane_wrist_orientation_blend_alpha=float(args.teleop_palm_plane_blend_alpha),
+                    loop_hz=float(args.teleop_loop_hz),
+                    print_every_n_frames=int(args.teleop_print_every_n_frames),
+                    enable_head_tracker=bool(args.teleop_enable_head_tracker),
+                    enable_synthetic_hands_plugin=bool(args.teleop_synthetic_hands_plugin),
+                    isaac_teleop_root=args.teleop_isaac_teleop_root,
+                    startup_timeout_s=float(args.teleop_startup_timeout_s),
+                    startup_retry_interval_s=float(args.teleop_startup_retry_interval_s),
+                    teleop_trace_path=args.teleop_trace_path,
+                ),
+                robot,
+            )
+        self.teleop_session.__enter__()
+        self._teleop_session_entered = True
+        if args.teleop_enable_voice_controls:
+            self.teleop_voice_policy = VoiceTeleopControlPolicy(
+                VoiceTeleopControlConfig(
+                    host=args.teleop_voice_control_host,
+                    port=int(args.teleop_voice_control_port),
+                )
+            )
+            self.teleop_voice_policy.connect()
+        self.teleop_xr_status_publisher = XrTeleopStatusPublisher(args.teleop_xr_status_path)
+        self._publish_teleop_xr_status(lifecycle_event="session_started", force=True)
+        atexit.register(self.close_quest_teleop)
+        print(
+            f"[newton-quest-teleop] teleop ready source={args.teleop_input_source}. "
+            "Say 开始 to engage, 暂停 to clutch, 继续 to resume, 重置 to recenter, 停止 to hold.",
+            flush=True,
+        )
+
+    def _set_teleop_mode(self, mode: str, event: str) -> None:
+        self.teleop_mode = str(mode)
+        self.teleop_last_event = str(event)
+        if self.teleop_robot is not None and hasattr(self.teleop_robot, "set_command_gate"):
+            self.teleop_robot.set_command_gate(
+                self.teleop_mode == "engaged",
+                mode=self.teleop_mode,
+                last_event=self.teleop_last_event,
+            )
+        print(f"[newton-quest-teleop] mode={self.teleop_mode} event={self.teleop_last_event}", flush=True)
+
+    def _apply_teleop_voice_events(self, events) -> bool:
+        if not events.commands_seen:
+            return False
+        if events.estop_requested:
+            self._set_teleop_mode("fault", "estop")
+        if events.recenter_requested:
+            self.reset_scene_to_initial()
+            self._set_teleop_mode("ready", "scene_reset")
+            self._publish_teleop_xr_status(force=True)
+            return bool(events.exit_requested)
+        if events.clutch_requested:
+            self._set_teleop_mode("clutched", "entered_clutch")
+        if events.resume_requested:
+            if self.teleop_robot is not None and hasattr(self.teleop_robot, "reset_relative_anchor"):
+                self.teleop_robot.reset_relative_anchor()
+            self._set_teleop_mode("engaged", "resumed_from_clutch")
+        if events.engage_requested:
+            if self.teleop_robot is not None and hasattr(self.teleop_robot, "reset_relative_anchor"):
+                self.teleop_robot.reset_relative_anchor()
+            self._set_teleop_mode("engaged", "engaged")
+        if events.stop_requested:
+            if self.teleop_robot is not None and hasattr(self.teleop_robot, "reset_relative_anchor"):
+                self.teleop_robot.reset_relative_anchor()
+            self._set_teleop_mode("ready", "disengaged")
+        self._publish_teleop_xr_status(force=True)
+        return bool(events.exit_requested)
+
+    def _publish_teleop_xr_status(self, *, lifecycle_event: str | None = None, force: bool = False) -> None:
+        if self.teleop_xr_status_publisher is None:
+            return
+        if self.teleop_robot is not None and hasattr(self.teleop_robot, "xr_status_snapshot"):
+            snapshot = self.teleop_robot.xr_status_snapshot(mode=self.teleop_mode, last_event=self.teleop_last_event)
+        else:
+            snapshot = {"mode": self.teleop_mode, "last_event": self.teleop_last_event}
+        self.teleop_xr_status_publisher.publish(
+            snapshot=snapshot,
+            lifecycle_event=lifecycle_event,
+            force=force,
+        )
+
+    def close_quest_teleop(self) -> None:
+        if self.teleop_xr_status_publisher is not None:
+            self._publish_teleop_xr_status(lifecycle_event="session_stopped", force=True)
+            self.teleop_xr_status_publisher = None
+        if self.teleop_voice_policy is not None:
+            self.teleop_voice_policy.disconnect()
+            self.teleop_voice_policy = None
+        if self.teleop_session is None or not self._teleop_session_entered:
+            return
+        session = self.teleop_session
+        self._teleop_session_entered = False
+        self.teleop_session = None
+        self.teleop_robot = None
+        session.__exit__(None, None, None)
 
     def render(self) -> None:
         self.render_camera_previews()
@@ -1336,6 +1638,7 @@ class Example:
 
     def test_final(self) -> None:
         _assert_finite_state(self.state_0, "Simulation")
+        self.close_quest_teleop()
 
     @staticmethod
     def create_parser():
@@ -1370,14 +1673,32 @@ class Example:
         parser.add_argument(
             "--substeps",
             type=int,
-            default=4,
+            default=12,
             help="XPBD substeps per rendered frame.",
         )
         parser.add_argument(
             "--solver-iterations",
             type=int,
-            default=8,
+            default=6,
             help="XPBD iterations per substep.",
+        )
+        parser.add_argument(
+            "--rigid-gap",
+            type=float,
+            default=DEFAULT_RIGID_GAP_M,
+            help="Default rigid contact detection gap [m] for shapes without an explicit gap.",
+        )
+        parser.add_argument(
+            "--rigid-contact-relaxation",
+            type=float,
+            default=0.01,
+            help="XPBD rigid contact relaxation. Lower values make kinematic hand contacts less impulsive.",
+        )
+        parser.add_argument(
+            "--angular-damping",
+            type=float,
+            default=0.12,
+            help="XPBD angular damping for dynamic rigid bodies.",
         )
         parser.add_argument(
             "--simulate",
@@ -1517,7 +1838,7 @@ class Example:
         parser.add_argument(
             "--dynamic-bottle-friction",
             type=float,
-            default=1.0,
+            default=3.0,
             help="Minimum plastic friction coefficient for the dynamic bottle cylinder.",
         )
         parser.add_argument(
@@ -1541,7 +1862,7 @@ class Example:
         parser.add_argument(
             "--bottle-pos-y",
             type=float,
-            default=-0.0641,
+            default=0.0359,
             help="Dynamic bottle Y offset in scene frame [m].",
         )
         parser.add_argument(
@@ -1558,6 +1879,308 @@ class Example:
         )
         parser.add_argument("--bottle-pitch", type=float, default=0.0, help="Dynamic bottle pitch in scene frame [deg].")
         parser.add_argument("--bottle-yaw", type=float, default=0.0, help="Dynamic bottle yaw in scene frame [deg].")
+        parser.add_argument(
+            "--quest-teleop",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Run the migrated Quest/OpenXR teleop session and drive the Newton robot.",
+        )
+        parser.add_argument(
+            "--teleop-input-source",
+            choices=("overlay-log", "quest"),
+            default="overlay-log",
+            help="Teleop input source. overlay-log matches the harness camera_streamer hand skeleton path.",
+        )
+        parser.add_argument(
+            "--teleop-overlay-hand-log-path",
+            type=Path,
+            default=DEFAULT_OVERLAY_HAND_TRACE_PATH,
+            help="camera_streamer XR hand joint JSONL path used when --teleop-input-source=overlay-log.",
+        )
+        parser.add_argument(
+            "--teleop-overlay-stale-after-s",
+            type=float,
+            default=1.0,
+            help="Ignore overlay hand samples older than this many seconds.",
+        )
+        parser.add_argument(
+            "--teleop-app-name",
+            type=str,
+            default="NewtonNeroQuestTeleop",
+            help="OpenXR application name used by the Quest teleop session.",
+        )
+        parser.add_argument(
+            "--teleop-arm-side",
+            choices=("left", "right"),
+            default="right",
+            help="Nero arm side driven by Quest teleop.",
+        )
+        parser.add_argument(
+            "--teleop-pose-input-mode",
+            choices=("controller_abs", "hand_abs"),
+            default="hand_abs",
+            help="Quest pose input mode. Defaults to the harness hand-tracking mode.",
+        )
+        parser.add_argument(
+            "--teleop-arm-pose-command-mode",
+            choices=(
+                "legacy_retargeted_ee",
+                "raw_wrist_position_fixed_orientation",
+                "raw_wrist_position_full_orientation",
+            ),
+            default="raw_wrist_position_full_orientation",
+            help="Arm pose command mode used by the harness command converter.",
+        )
+        parser.add_argument(
+            "--teleop-fixed-arm-orientation-xyzw",
+            type=_vec4,
+            default=(0.0, 0.0, 0.0, 1.0),
+            help="Fixed arm orientation for fixed-orientation command mode, formatted x,y,z,w.",
+        )
+        parser.add_argument(
+            "--teleop-use-wrist-position-for-hand",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Use hand wrist position as the pose source in hand_abs mode.",
+        )
+        parser.add_argument(
+            "--teleop-use-wrist-rotation-for-hand",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Use hand wrist rotation as the pose source in hand_abs mode.",
+        )
+        parser.add_argument(
+            "--teleop-palm-plane-blend-alpha",
+            type=float,
+            default=1.0,
+            help="Blend alpha for the migrated palm-plane wrist orientation correction.",
+        )
+        parser.add_argument(
+            "--teleop-loop-hz",
+            type=float,
+            default=60.0,
+            help="Nominal Quest teleop loop frequency [Hz].",
+        )
+        parser.add_argument(
+            "--teleop-print-every-n-frames",
+            type=int,
+            default=30,
+            help="Print one teleop status line every N frames.",
+        )
+        parser.add_argument(
+            "--teleop-enable-voice-controls",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Listen for Quest voice commands on the local UDP control socket.",
+        )
+        parser.add_argument(
+            "--teleop-require-engage",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Require voice/controller engage before Newton follows Quest targets.",
+        )
+        parser.add_argument(
+            "--teleop-voice-control-host",
+            default=os.environ.get("TELEOP_QUEST_VOICE_UDP_HOST", os.environ.get("TELEOP_VOICE_UDP_HOST", "127.0.0.1")),
+            help="Host/IP for the local teleop voice UDP receiver.",
+        )
+        parser.add_argument(
+            "--teleop-voice-control-port",
+            type=int,
+            default=_default_voice_control_port(),
+            help="Port for the local teleop voice UDP receiver.",
+        )
+        parser.add_argument(
+            "--teleop-xr-status-path",
+            default=None,
+            help="Optional teleop_xr_status.json path used by the VR overlay.",
+        )
+        parser.add_argument(
+            "--teleop-enable-head-tracker",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Enable Quest head tracker input in the migrated teleop session.",
+        )
+        parser.add_argument(
+            "--teleop-synthetic-hands-plugin",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Enable the IsaacTeleop synthetic hands plugin.",
+        )
+        parser.add_argument(
+            "--teleop-isaac-teleop-root",
+            type=str,
+            default=None,
+            help="Optional IsaacTeleop checkout root. Defaults to TELEOP/IsaacTeleop search paths.",
+        )
+        parser.add_argument(
+            "--teleop-startup-timeout-s",
+            type=float,
+            default=30.0,
+            help="How long to wait for an active Quest/OpenXR session [s].",
+        )
+        parser.add_argument(
+            "--teleop-startup-retry-interval-s",
+            type=float,
+            default=1.0,
+            help="Retry interval while waiting for Quest/OpenXR startup [s].",
+        )
+        parser.add_argument(
+            "--teleop-trace-path",
+            type=str,
+            default=None,
+            help="Optional JSONL path for migrated teleop command traces.",
+        )
+        parser.add_argument(
+            "--teleop-drive-ik",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Drive Newton Nero arm joints with the migrated full-pose differential IK.",
+        )
+        parser.add_argument(
+            "--teleop-left-eef-body-suffix",
+            type=str,
+            default="/left_revo2_flange",
+            help="Newton body-label suffix used as the left IK EEF frame. Defaults to the harness revo2_flange.",
+        )
+        parser.add_argument(
+            "--teleop-right-eef-body-suffix",
+            type=str,
+            default="/right_revo2_flange",
+            help="Newton body-label suffix used as the right IK EEF frame. Defaults to the harness revo2_flange.",
+        )
+        parser.add_argument(
+            "--teleop-ik-max-task-step-m",
+            type=float,
+            default=0.05,
+            help="Maximum Newton teleop IK translational task step per frame [m].",
+        )
+        parser.add_argument(
+            "--teleop-ik-max-rotation-step-rad",
+            type=float,
+            default=float(np.deg2rad(10.0)),
+            help="Maximum Newton teleop IK rotational task step per frame [rad].",
+        )
+        parser.add_argument(
+            "--teleop-ik-orientation-weight",
+            type=float,
+            default=0.35,
+            help="Newton teleop IK orientation weight.",
+        )
+        parser.add_argument(
+            "--teleop-ik-max-joint-step-rad",
+            type=float,
+            default=0.045,
+            help="Maximum Newton teleop IK joint step per frame [rad], matching the harness clamp.",
+        )
+        parser.add_argument(
+            "--teleop-ik-max-joint-velocity-rad-s",
+            type=float,
+            default=0.0,
+            help="Maximum Newton teleop IK joint velocity [rad/s]. 0 disables the extra velocity clamp.",
+        )
+        parser.add_argument(
+            "--teleop-ik-damping-lambda",
+            type=float,
+            default=0.02,
+            help="Newton teleop IK damped-least-squares lambda.",
+        )
+        parser.add_argument(
+            "--teleop-hand-max-joint-step-rad",
+            type=float,
+            default=0.0,
+            help="Maximum L10 hand joint command step per teleop frame [rad]. Lower values make grasp closure softer.",
+        )
+        parser.add_argument(
+            "--teleop-hand-publish-kinematic-velocity",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Publish L10 finger joint velocities into Newton kinematic contact friction.",
+        )
+        parser.add_argument(
+            "--teleop-relative-control",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Use the harness relative-control anchor for Quest wrist motion.",
+        )
+        parser.add_argument(
+            "--teleop-translation-scale",
+            type=_vec3,
+            default=(1.0, 1.0, 1.0),
+            help="Quest-to-target translation scale x,y,z.",
+        )
+        parser.add_argument(
+            "--teleop-workspace-origin",
+            type=_vec3,
+            default=(0.0, 0.0, 0.0),
+            help="Absolute-control workspace origin x,y,z [m].",
+        )
+        parser.add_argument(
+            "--teleop-input-axis-map",
+            type=_axis_map,
+            default=("x", "y", "z"),
+            help="Harness input axis map, formatted as three tokens such as z,x,y.",
+        )
+        parser.add_argument(
+            "--teleop-openxr-coordinate-adapter",
+            choices=("none", "openxr_genesis"),
+            default="openxr_genesis",
+            help="Coordinate adapter applied to Quest/OpenXR wrist vectors and orientations.",
+        )
+        parser.add_argument(
+            "--teleop-openxr-yaw-recenter",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Yaw-recenter OpenXR forward so the operator front matches the robot front.",
+        )
+        parser.add_argument(
+            "--teleop-orientation",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Use Quest wrist orientation for Newton full-pose IK.",
+        )
+        parser.add_argument(
+            "--teleop-orientation-source",
+            choices=("wrist_quat", "hand_anatomical_frame", "hand_beavr_anatomical_frame", "hand_genesis_wrist_frame"),
+            default="hand_genesis_wrist_frame",
+            help="Remote Nero wrist orientation source.",
+        )
+        parser.add_argument(
+            "--teleop-orientation-axis-map",
+            type=_axis_map,
+            default=("x", "y", "z"),
+            help="Remote Nero orientation axis map.",
+        )
+        parser.add_argument(
+            "--teleop-orientation-max-speed-rad-s",
+            type=float,
+            default=3.0,
+            help="Maximum commanded wrist orientation speed [rad/s].",
+        )
+        parser.add_argument(
+            "--teleop-orientation-tool-offset-wxyz",
+            type=_vec4,
+            default=(1.0, 0.0, 0.0, 0.0),
+            help="Tool-local orientation offset formatted w,x,y,z.",
+        )
+        parser.add_argument(
+            "--teleop-orientation-reference-mode",
+            choices=("world_delta", "tool_local_delta", "calibrated_tool_local"),
+            default="calibrated_tool_local",
+            help="Remote Nero orientation reference mode.",
+        )
+        parser.add_argument(
+            "--teleop-fixed-quaternion-wxyz",
+            type=_vec4,
+            default=None,
+            help="Optional fixed Newton target quaternion formatted w,x,y,z when --no-teleop-orientation is used.",
+        )
+        parser.add_argument(
+            "--teleop-finite-difference-rad",
+            type=float,
+            default=1.0e-4,
+            help="Finite-difference step [rad] for Newton IK Jacobian.",
+        )
         parser.add_argument(
             "--d455-json",
             type=Path,

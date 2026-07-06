@@ -1,0 +1,33 @@
+{
+  "description": "D405 body pose relative to right_connector in dual_nero_linker_l10_combined.urdf.",
+  "connector_side": "right",
+  "connector_entity": "right_connector",
+  "offset_xyz_in_connector_frame_m": [
+    0.022759,
+    -0.004138,
+    0.013103
+  ],
+  "euler_xyz_in_connector_frame_deg": [
+    79.969,
+    0.0,
+    0.0
+  ],
+  "quat_wxyz_in_connector_frame": [
+    0.7662183046340942,
+    0.6425803303718567,
+    0.0,
+    0.0
+  ],
+  "python_constants": {
+    "RIGHT_D405_CONNECTOR_REL_POS_M": [
+      0.022759,
+      -0.004138,
+      0.013103
+    ],
+    "RIGHT_D405_CONNECTOR_REL_EULER_DEG": [
+      79.969,
+      0.0,
+      0.0
+    ]
+  }
+}
