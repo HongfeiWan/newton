@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class NewtonRuntimeRobotConfig:
     arm_side: ArmSide = "right"
+    publish_mode: str = "drive_target"
     drive_ik: bool = True
     relative_control: bool = True
     require_initial_anchor: bool = True
@@ -183,6 +184,8 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._target_anchor_xyz: tuple[float, float, float] | None = None
         self._joint_q_host: np.ndarray | None = None
         self._joint_qd_host: np.ndarray | None = None
+        self._target_joint_q_host: np.ndarray | None = None
+        self._target_joint_qd_host: np.ndarray | None = None
         self._arm_joint_q_indices: tuple[int, ...] = ()
         self._arm_joint_qd_indices: tuple[int, ...] = ()
         self._joint_q_index_by_label: dict[str, int] = {}
@@ -213,6 +216,8 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         model = self.example.model
         self._joint_q_host = self.example.state_0.joint_q.numpy().copy()
         self._joint_qd_host = self.example.state_0.joint_qd.numpy().copy()
+        self._target_joint_q_host = self._joint_q_host.copy()
+        self._target_joint_qd_host = self._joint_qd_host.copy()
         self._joint_q_index_by_label, self._joint_qd_index_by_label = _joint_scalar_index_maps(model)
         self._hand_closing_direction_by_joint = _l10_closing_direction_by_joint()
         self._hand_joint_limits_by_joint = _l10_joint_limits_by_joint()
@@ -244,6 +249,7 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         print(
             "[newton-quest-teleop] connected"
             f" side={self.config.arm_side}"
+            f" publish_mode={self.config.publish_mode}"
             f" drive_ik={'on' if self.config.drive_ik else 'hand-only'}"
             f" relative={'on' if self.config.relative_control else 'off'}"
             f" openxr_adapter={self.config.mapping.openxr_coordinate_adapter}"
@@ -265,6 +271,8 @@ class NewtonRuntimeRobotInterface(RobotInterface):
                 )
             return
 
+        if self.config.publish_mode == "drive_target":
+            self._sync_live_joint_state()
         self._ensure_anchor(command)
         if self.config.drive_ik:
             self._apply_arm_command(command)
@@ -334,6 +342,8 @@ class NewtonRuntimeRobotInterface(RobotInterface):
             return
         self._joint_q_host = self.example.state_0.joint_q.numpy().copy()
         self._joint_qd_host = self.example.state_0.joint_qd.numpy().copy()
+        self._target_joint_q_host = self._joint_q_host.copy()
+        self._target_joint_qd_host = self._joint_qd_host.copy()
         self._last_ik_result = None
         self.command_count = 0
         if self._kinematics is not None:
@@ -681,17 +691,21 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         result = self._ik.step(self._robot_state(timestamp_s=command.timestamp_s), self.example.frame_dt)
         self._last_ik_result = result
         assert self._joint_q_host is not None and self._joint_qd_host is not None
+        assert self._target_joint_q_host is not None and self._target_joint_qd_host is not None
         for target_index, value in zip(self._arm_joint_q_indices, result.q_cmd, strict=True):
-            self._joint_q_host[int(target_index)] = float(value)
+            self._target_joint_q_host[int(target_index)] = float(value)
         if result.dq_cmd is not None:
             for target_index, value in zip(self._arm_joint_qd_indices, result.dq_cmd, strict=True):
-                self._joint_qd_host[int(target_index)] = float(value)
-        if self._kinematics is not None:
-            self._kinematics.sync_joint_q(self._joint_q_host)
+                self._target_joint_qd_host[int(target_index)] = float(value)
+        if self.config.publish_mode == "state" and self._kinematics is not None:
+            self._kinematics.sync_joint_q(self._target_joint_q_host)
 
     def _apply_hand_target(self, hand_target: NamedJointValues) -> None:
         joint_values = _expand_l10_mimic_joint_values(hand_target)
         assert self._joint_q_host is not None and self._joint_qd_host is not None
+        assert self._target_joint_q_host is not None and self._target_joint_qd_host is not None
+        if self.config.publish_mode == "drive_target":
+            self._sync_live_joint_state()
         max_step = max(0.0, float(self.config.hand_max_joint_step_rad))
         for joint_name, value in zip(joint_values.joint_names, joint_values.joint_positions, strict=True):
             label_suffix = _l10_joint_label_suffix(self.config.arm_side, str(joint_name))
@@ -707,14 +721,14 @@ class NewtonRuntimeRobotInterface(RobotInterface):
                 current_value=current_value,
                 target_value=target_value,
             )
-            self._joint_q_host[int(q_index)] = target_value
+            self._target_joint_q_host[int(q_index)] = target_value
             qd_index = self._joint_qd_index_by_label.get(label_suffix)
             if qd_index is not None:
                 if self.config.hand_publish_kinematic_velocity:
                     hand_qd = (target_value - current_value) / float(self.example.frame_dt)
                 else:
                     hand_qd = 0.0
-                self._joint_qd_host[int(qd_index)] = hand_qd
+                self._target_joint_qd_host[int(qd_index)] = hand_qd
 
     def _clamp_hand_target_for_bottle_contact(
         self,
@@ -753,10 +767,18 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         return clamped_target
 
     def _publish_joint_state(self) -> None:
-        assert self._joint_q_host is not None and self._joint_qd_host is not None
+        assert self._target_joint_q_host is not None and self._target_joint_qd_host is not None
         model = self.example.model
-        joint_q = wp.array(self._joint_q_host, dtype=wp.float32, device=model.device)
-        joint_qd = wp.array(self._joint_qd_host, dtype=wp.float32, device=model.device)
+        joint_q = wp.array(self._target_joint_q_host, dtype=wp.float32, device=model.device)
+        joint_qd = wp.array(self._target_joint_qd_host, dtype=wp.float32, device=model.device)
+
+        if self.config.publish_mode == "drive_target":
+            self.example.control.joint_target_q = joint_q
+            self.example.control.joint_target_qd = joint_qd
+            return
+        if self.config.publish_mode != "state":
+            raise ValueError(f"Unsupported Newton publish_mode: {self.config.publish_mode!r}")
+
         model.joint_q = joint_q
         model.joint_qd = joint_qd
         self.example.state_0.joint_q = joint_q
@@ -773,6 +795,14 @@ class NewtonRuntimeRobotInterface(RobotInterface):
             body_flag_filter=newton.BodyFlags.KINEMATIC,
         )
         model.bvh_refit_shapes(self.example.state_0)
+        self._joint_q_host = self._target_joint_q_host.copy()
+        self._joint_qd_host = self._target_joint_qd_host.copy()
+
+    def _sync_live_joint_state(self) -> None:
+        self._joint_q_host = self.example.state_0.joint_q.numpy().copy()
+        self._joint_qd_host = self.example.state_0.joint_qd.numpy().copy()
+        if self._kinematics is not None:
+            self._kinematics.sync_joint_q(self._joint_q_host)
 
     def _robot_state(self, *, timestamp_s: float) -> RobotStateSnapshot:
         return RobotStateSnapshot(

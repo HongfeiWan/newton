@@ -75,6 +75,7 @@ DEFAULT_RIGID_CONTACT_RELAXATION = 0.0015
 DEFAULT_ANGULAR_DAMPING = 0.25
 REALISTIC_BOTTLE_MASS_KG = 0.5
 REALISTIC_BOTTLE_TABLE_FRICTION = 0.45
+DYNAMIC_CUBE_SIZE_M = (0.05, 0.05, 0.15)
 L10_CONTACT_FRICTION = 5.0
 L10_CONTACT_TORSIONAL_FRICTION = 0.15
 L10_CONTACT_ROLLING_FRICTION = 0.02
@@ -120,9 +121,21 @@ class BottleTableGuard:
     min_y: float
     max_y: float
     top_z: float
-    radius: float
-    half_height: float
+    half_extents: tuple[float, float, float]
     sliding_friction: float
+
+
+@dataclass
+class DynamicObjectProxy:
+    shape: str
+    pos: list[float]
+    rpy_deg: list[float]
+    mass: float
+    friction: float
+    half_extents: tuple[float, float, float]
+    visual_glb: Path | None = None
+    radius: float | None = None
+    height: float | None = None
 
 
 @dataclass
@@ -238,6 +251,75 @@ def _make_urdf_bodies_kinematic(builder: newton.ModelBuilder, first_body: int, l
         builder.body_inv_inertia[body_index] = wp.mat33(0.0)
         builder.body_qd[body_index] = wp.spatial_vector(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     print(f"URDF body mode: kinematic bodies={max(0, last_body - first_body)}")
+
+
+def _configure_dual_nero_drive_joints(
+    builder: newton.ModelBuilder,
+    *,
+    arm_ke: float,
+    arm_kd: float,
+    arm_effort_limit: float,
+    arm_armature: float,
+    hand_ke: float,
+    hand_kd: float,
+    hand_effort_limit: float,
+    hand_armature: float,
+) -> None:
+    arm_count = 0
+    hand_count = 0
+    position_mode = int(newton.JointTargetMode.POSITION)
+
+    for joint_index, label in enumerate(builder.joint_label):
+        short_label = str(label).rsplit("/", maxsplit=1)[-1]
+        is_arm_joint = any(short_label == f"{side}_joint{axis}" for side in ("left", "right") for axis in range(1, 8))
+        is_l10_joint = short_label.startswith(("left_l10_", "right_l10_"))
+        if not is_arm_joint and not is_l10_joint:
+            continue
+
+        qd_start = int(builder.joint_qd_start[joint_index])
+        qd_end = (
+            int(builder.joint_qd_start[joint_index + 1])
+            if joint_index + 1 < len(builder.joint_qd_start)
+            else len(builder.joint_target_ke)
+        )
+        q_start = int(builder.joint_q_start[joint_index])
+        q_end = (
+            int(builder.joint_q_start[joint_index + 1])
+            if joint_index + 1 < len(builder.joint_q_start)
+            else len(builder.joint_q)
+        )
+        if qd_end - qd_start != 1 or q_end - q_start != 1:
+            print(f"Warning: drive tuning skipped non-scalar joint {label!r}")
+            continue
+
+        if is_l10_joint:
+            target_ke = float(hand_ke)
+            target_kd = float(hand_kd)
+            effort_limit = float(hand_effort_limit)
+            armature = float(hand_armature)
+            hand_count += 1
+        else:
+            target_ke = float(arm_ke)
+            target_kd = float(arm_kd)
+            effort_limit = float(arm_effort_limit)
+            armature = float(arm_armature)
+            arm_count += 1
+
+        builder.joint_target_ke[qd_start] = target_ke
+        builder.joint_target_kd[qd_start] = target_kd
+        builder.joint_effort_limit[qd_start] = effort_limit
+        builder.joint_armature[qd_start] = armature
+        builder.joint_target_mode[qd_start] = position_mode
+        builder.joint_target_q[q_start] = builder.joint_q[q_start]
+        builder.joint_target_qd[qd_start] = 0.0
+
+    print(
+        "URDF drive tuning:"
+        f" arm_joints={arm_count} arm_ke={arm_ke:g} arm_kd={arm_kd:g}"
+        f" arm_effort_limit={arm_effort_limit:g} arm_armature={arm_armature:g}"
+        f" l10_joints={hand_count} l10_ke={hand_ke:g} l10_kd={hand_kd:g}"
+        f" l10_effort_limit={hand_effort_limit:g} l10_armature={hand_armature:g}"
+    )
 
 
 def _set_initial_arm_pose(
@@ -840,6 +922,81 @@ def _configure_dynamic_bottle_collision(
     builder.shape_material_mu_rolling[shape_index] = float(rolling_friction)
 
 
+def _shape_cfg(
+    *,
+    density: float,
+    friction: float,
+    visible: bool = True,
+    colliding: bool = True,
+) -> newton.ModelBuilder.ShapeConfig:
+    cfg = newton.ModelBuilder.ShapeConfig()
+    cfg.density = float(density)
+    cfg.mu = float(friction)
+    cfg.restitution = 0.0
+    cfg.mu_torsional = DYNAMIC_BOTTLE_CONTACT_TORSIONAL_FRICTION
+    cfg.mu_rolling = DYNAMIC_BOTTLE_CONTACT_ROLLING_FRICTION
+    cfg.ke = L10_CONTACT_KE
+    cfg.kd = L10_CONTACT_KD
+    cfg.kf = L10_CONTACT_KF
+    cfg.is_visible = bool(visible)
+    cfg.has_shape_collision = bool(colliding)
+    cfg.has_particle_collision = bool(colliding)
+    if not colliding:
+        cfg.collision_group = 0
+    return cfg
+
+
+def _dynamic_object_proxy_from_bottle_spec(bottle_spec) -> DynamicObjectProxy:
+    radius = float(bottle_spec.radius)
+    half_height = 0.5 * float(bottle_spec.height)
+    return DynamicObjectProxy(
+        shape="cylinder",
+        pos=[float(v) for v in bottle_spec.pos],
+        rpy_deg=[float(v) for v in bottle_spec.rpy_deg],
+        mass=float(bottle_spec.mass),
+        friction=float(bottle_spec.friction),
+        half_extents=(radius, radius, half_height),
+        visual_glb=Path(bottle_spec.visual_glb),
+        radius=radius,
+        height=float(bottle_spec.height),
+    )
+
+
+def _build_dynamic_box_object(
+    builder: newton.ModelBuilder,
+    proxy: DynamicObjectProxy,
+    *,
+    margin: float,
+    gap: float,
+    torsional_friction: float,
+    rolling_friction: float,
+) -> dict[str, int | list[int]]:
+    hx, hy, hz = (float(v) for v in proxy.half_extents)
+    volume = max(8.0 * hx * hy * hz, 1.0e-9)
+    cfg = _shape_cfg(density=float(proxy.mass) / volume, friction=float(proxy.friction), visible=True, colliding=True)
+    cfg.margin = float(margin)
+    cfg.gap = float(gap)
+    cfg.mu_torsional = float(torsional_friction)
+    cfg.mu_rolling = float(rolling_friction)
+    body = builder.add_body(
+        xform=wp.transform(
+            wp.vec3(*proxy.pos),
+            _quat_from_rpy(*(np.deg2rad(proxy.rpy_deg).tolist())),
+        ),
+        label="dynamic_bottle",
+    )
+    box_shape = builder.add_shape_box(
+        body=body,
+        hx=hx,
+        hy=hy,
+        hz=hz,
+        cfg=cfg,
+        color=(0.1, 0.55, 1.0),
+        label="dynamic_bottle_collision_box",
+    )
+    return {"body": body, "collision_shape": box_shape, "visual_shapes": []}
+
+
 def _oriented_cylinder_aabb_half_extents(rotation: np.ndarray, radius: float, height: float) -> np.ndarray:
     axis = np.asarray(rotation, dtype=np.float64).reshape(3, 3)[:, 2]
     half_height = 0.5 * float(height)
@@ -858,8 +1015,9 @@ def _enforce_cylinder_above_table_top_kernel(
     table_min_y: float,
     table_max_y: float,
     table_top_z: float,
-    radius: float,
-    half_height: float,
+    half_extent_x: float,
+    half_extent_y: float,
+    half_extent_z: float,
     clearance: float,
     sliding_friction: float,
     gravity_magnitude: float,
@@ -871,16 +1029,30 @@ def _enforce_cylinder_above_table_top_kernel(
     transform = body_q[body_index]
     pos = wp.transform_get_translation(transform)
     quat = wp.transform_get_rotation(transform)
-    axis = wp.quat_rotate(quat, wp.vec3(0.0, 0.0, 1.0))
 
-    half_x = wp.abs(axis[0]) * half_height + wp.sqrt(wp.max(0.0, 1.0 - axis[0] * axis[0])) * radius
-    half_y = wp.abs(axis[1]) * half_height + wp.sqrt(wp.max(0.0, 1.0 - axis[1] * axis[1])) * radius
+    local_x = wp.quat_rotate(quat, wp.vec3(1.0, 0.0, 0.0))
+    local_y = wp.quat_rotate(quat, wp.vec3(0.0, 1.0, 0.0))
+    local_z = wp.quat_rotate(quat, wp.vec3(0.0, 0.0, 1.0))
+    half_x = (
+        wp.abs(local_x[0]) * half_extent_x
+        + wp.abs(local_y[0]) * half_extent_y
+        + wp.abs(local_z[0]) * half_extent_z
+    )
+    half_y = (
+        wp.abs(local_x[1]) * half_extent_x
+        + wp.abs(local_y[1]) * half_extent_y
+        + wp.abs(local_z[1]) * half_extent_z
+    )
     if pos[0] < table_min_x - half_x or pos[0] > table_max_x + half_x:
         return
     if pos[1] < table_min_y - half_y or pos[1] > table_max_y + half_y:
         return
 
-    vertical_half = wp.abs(axis[2]) * half_height + wp.sqrt(wp.max(0.0, 1.0 - axis[2] * axis[2])) * radius
+    vertical_half = (
+        wp.abs(local_x[2]) * half_extent_x
+        + wp.abs(local_y[2]) * half_extent_y
+        + wp.abs(local_z[2]) * half_extent_z
+    )
     min_bottom_z = table_top_z + clearance
     bottom_z = pos[2] - vertical_half
     contact_band = wp.max(wp.abs(clearance), 0.002)
@@ -909,7 +1081,7 @@ def _enforce_cylinder_above_table_top_kernel(
 
 
 def _bottle_table_guard_from_scene_collision(
-    bottle_spec,
+    object_proxy: DynamicObjectProxy,
     boxes: list[SceneCollisionBox],
     *,
     scene_pos: tuple[float, float, float],
@@ -919,13 +1091,9 @@ def _bottle_table_guard_from_scene_collision(
     if not boxes:
         return None
 
-    bottle_pos = np.asarray(bottle_spec.pos, dtype=np.float64)
-    bottle_rotation = _rotation_from_euler_deg(tuple(bottle_spec.rpy_deg))
-    bottle_half_extents = _oriented_cylinder_aabb_half_extents(
-        bottle_rotation,
-        float(bottle_spec.radius),
-        float(bottle_spec.height),
-    )
+    object_pos = np.asarray(object_proxy.pos, dtype=np.float64)
+    object_rotation = _rotation_from_euler_deg(tuple(object_proxy.rpy_deg))
+    object_half_extents = np.abs(object_rotation) @ np.asarray(object_proxy.half_extents, dtype=np.float64)
     selected: BottleTableGuard | None = None
 
     for box in boxes:
@@ -937,7 +1105,7 @@ def _bottle_table_guard_from_scene_collision(
         )
         box_half_extents = np.abs(box_rotation) @ (0.5 * box_size)
         xy_overlap = np.all(
-            np.abs(bottle_pos[:2] - box_pos[:2]) <= box_half_extents[:2] + bottle_half_extents[:2] + 0.02
+            np.abs(object_pos[:2] - box_pos[:2]) <= box_half_extents[:2] + object_half_extents[:2] + 0.02
         )
         if not xy_overlap:
             continue
@@ -948,9 +1116,8 @@ def _bottle_table_guard_from_scene_collision(
             min_y=float(box_pos[1] - box_half_extents[1]),
             max_y=float(box_pos[1] + box_half_extents[1]),
             top_z=float(box_pos[2] + box_half_extents[2]),
-            radius=float(bottle_spec.radius),
-            half_height=0.5 * float(bottle_spec.height),
-            sliding_friction=0.5 * (float(box.friction) + float(bottle_spec.friction)),
+            half_extents=tuple(float(v) for v in object_proxy.half_extents),
+            sliding_friction=0.5 * (float(box.friction) + float(object_proxy.friction)),
         )
         if selected is None or guard.top_z > selected.top_z:
             selected = guard
@@ -959,7 +1126,7 @@ def _bottle_table_guard_from_scene_collision(
 
 
 def _lift_bottle_above_scene_collision(
-    bottle_spec,
+    object_proxy: DynamicObjectProxy,
     boxes: list[SceneCollisionBox],
     *,
     scene_pos: tuple[float, float, float],
@@ -970,14 +1137,10 @@ def _lift_bottle_above_scene_collision(
     if not boxes:
         return
 
-    bottle_pos = np.asarray(bottle_spec.pos, dtype=np.float64)
-    bottle_rotation = _rotation_from_euler_deg(tuple(bottle_spec.rpy_deg))
-    bottle_half_extents = _oriented_cylinder_aabb_half_extents(
-        bottle_rotation,
-        float(bottle_spec.radius),
-        float(bottle_spec.height),
-    )
-    target_z = float(bottle_pos[2])
+    object_pos = np.asarray(object_proxy.pos, dtype=np.float64)
+    object_rotation = _rotation_from_euler_deg(tuple(object_proxy.rpy_deg))
+    object_half_extents = np.abs(object_rotation) @ np.asarray(object_proxy.half_extents, dtype=np.float64)
+    target_z = float(object_pos[2])
 
     for box in boxes:
         box_pos, box_rotation, box_size = _scene_collision_box_world_pose(
@@ -988,18 +1151,18 @@ def _lift_bottle_above_scene_collision(
         )
         box_half_extents = np.abs(box_rotation) @ (0.5 * box_size)
         xy_overlap = np.all(
-            np.abs(bottle_pos[:2] - box_pos[:2]) <= box_half_extents[:2] + bottle_half_extents[:2] + 0.02
+            np.abs(object_pos[:2] - box_pos[:2]) <= box_half_extents[:2] + object_half_extents[:2] + 0.02
         )
         if not xy_overlap:
             continue
 
         box_top_z = float(box_pos[2] + box_half_extents[2])
-        target_z = max(target_z, box_top_z + float(bottle_half_extents[2]) + float(clearance))
+        target_z = max(target_z, box_top_z + float(object_half_extents[2]) + float(clearance))
 
-    if target_z > bottle_pos[2] + 1.0e-6:
-        old_z = float(bottle_spec.pos[2])
-        bottle_spec.pos[2] = target_z
-        print(f"Raised dynamic bottle above scene collision: z {old_z:.6f} -> {target_z:.6f}")
+    if target_z > object_pos[2] + 1.0e-6:
+        old_z = float(object_proxy.pos[2])
+        object_proxy.pos[2] = target_z
+        print(f"Raised dynamic object above scene collision: z {old_z:.6f} -> {target_z:.6f}")
 
 
 def _load_d455_config(path: Path) -> dict[str, object]:
@@ -1204,6 +1367,17 @@ class Example:
             left_q=tuple(args.initial_left_arm_q),
             right_q=tuple(args.initial_right_arm_q),
         )
+        _configure_dual_nero_drive_joints(
+            builder,
+            arm_ke=args.drive_arm_target_ke,
+            arm_kd=args.drive_arm_target_kd,
+            arm_effort_limit=args.drive_arm_effort_limit,
+            arm_armature=args.drive_arm_armature,
+            hand_ke=args.drive_hand_target_ke,
+            hand_kd=args.drive_hand_target_kd,
+            hand_effort_limit=args.drive_hand_effort_limit,
+            hand_armature=args.drive_hand_armature,
+        )
         if args.robot_kinematic:
             _make_urdf_bodies_kinematic(builder, urdf_first_body, len(builder.body_q))
         if args.d405_body_visual:
@@ -1265,64 +1439,109 @@ class Example:
             print(f"Warning: scene collision spec not found, skipping: {args.scene_collision_spec}")
 
         self.dynamic_bottle_spec_path = _resolve_optional_file(args.dynamic_bottle_spec)
-        if self.dynamic_bottle_spec_path is not None:
+        if args.dynamic_object_shape == "box" or self.dynamic_bottle_spec_path is not None:
             bottle_position, bottle_rotation = self._bottle_world_pose()
-            dynamic_bottle_spec = load_dynamic_bottle_spec(self.dynamic_bottle_spec_path)
-            dynamic_bottle_spec.pos = [float(v) for v in bottle_position]
-            dynamic_bottle_spec.rpy_deg = list(_euler_deg_from_rotation(bottle_rotation))
-            dynamic_bottle_spec.mass = float(args.dynamic_bottle_mass)
-            dynamic_bottle_spec.friction = float(args.dynamic_bottle_friction)
-            if args.lift_bottle_above_scene_collision:
+            dynamic_bottle_spec = None
+            if args.dynamic_object_shape == "cylinder":
+                if self.dynamic_bottle_spec_path is None:
+                    print(f"Warning: dynamic bottle spec not found, skipping: {args.dynamic_bottle_spec}")
+                    dynamic_object_proxy = None
+                else:
+                    dynamic_bottle_spec = load_dynamic_bottle_spec(self.dynamic_bottle_spec_path)
+                    dynamic_bottle_spec.pos = [float(v) for v in bottle_position]
+                    dynamic_bottle_spec.rpy_deg = list(_euler_deg_from_rotation(bottle_rotation))
+                    dynamic_bottle_spec.mass = float(args.dynamic_bottle_mass)
+                    dynamic_bottle_spec.friction = float(args.dynamic_bottle_friction)
+                    dynamic_object_proxy = _dynamic_object_proxy_from_bottle_spec(dynamic_bottle_spec)
+            else:
+                dynamic_object_proxy = DynamicObjectProxy(
+                    shape="box",
+                    pos=[float(v) for v in bottle_position],
+                    rpy_deg=list(_euler_deg_from_rotation(bottle_rotation)),
+                    mass=float(args.dynamic_bottle_mass),
+                    friction=float(args.dynamic_bottle_friction),
+                    half_extents=(
+                        0.5 * float(args.dynamic_box_size_x),
+                        0.5 * float(args.dynamic_box_size_y),
+                        0.5 * float(args.dynamic_box_size_z),
+                    ),
+                )
+
+            if dynamic_object_proxy is None:
+                pass
+            elif args.lift_bottle_above_scene_collision:
                 _lift_bottle_above_scene_collision(
-                    dynamic_bottle_spec,
+                    dynamic_object_proxy,
                     scene_collision_boxes,
                     scene_pos=tuple(self.scene_pos),
                     scene_rpy_deg=tuple(self.scene_rpy_deg),
                     scene_scale=tuple(self.scene_scale),
                     clearance=args.bottle_scene_collision_clearance,
                 )
-            self.dynamic_bottle_handles = build_dynamic_bottle(builder, dynamic_bottle_spec)
-            _configure_dynamic_bottle_collision(
-                builder,
-                self.dynamic_bottle_handles,
-                margin=args.dynamic_bottle_contact_margin,
-                gap=args.dynamic_bottle_contact_gap,
-                torsional_friction=args.dynamic_bottle_torsional_friction,
-                rolling_friction=args.dynamic_bottle_rolling_friction,
-            )
-            if args.enforce_bottle_above_scene_collision:
+            if dynamic_bottle_spec is not None and dynamic_object_proxy is not None:
+                dynamic_bottle_spec.pos = list(dynamic_object_proxy.pos)
+                dynamic_bottle_spec.rpy_deg = list(dynamic_object_proxy.rpy_deg)
+
+            if dynamic_object_proxy is not None and args.dynamic_object_shape == "box":
+                self.dynamic_bottle_handles = _build_dynamic_box_object(
+                    builder,
+                    dynamic_object_proxy,
+                    margin=args.dynamic_bottle_contact_margin,
+                    gap=args.dynamic_bottle_contact_gap,
+                    torsional_friction=args.dynamic_bottle_torsional_friction,
+                    rolling_friction=args.dynamic_bottle_rolling_friction,
+                )
+            elif dynamic_bottle_spec is not None:
+                self.dynamic_bottle_handles = build_dynamic_bottle(builder, dynamic_bottle_spec)
+                _configure_dynamic_bottle_collision(
+                    builder,
+                    self.dynamic_bottle_handles,
+                    margin=args.dynamic_bottle_contact_margin,
+                    gap=args.dynamic_bottle_contact_gap,
+                    torsional_friction=args.dynamic_bottle_torsional_friction,
+                    rolling_friction=args.dynamic_bottle_rolling_friction,
+                )
+            if dynamic_object_proxy is not None and args.enforce_bottle_above_scene_collision:
                 self._bottle_table_guard = _bottle_table_guard_from_scene_collision(
-                    dynamic_bottle_spec,
+                    dynamic_object_proxy,
                     scene_collision_boxes,
                     scene_pos=tuple(self.scene_pos),
                     scene_rpy_deg=tuple(self.scene_rpy_deg),
                     scene_scale=tuple(self.scene_scale),
                 )
-            print(
-                "Loaded dynamic bottle:"
-                f" spec={self.dynamic_bottle_spec_path}"
-                f" visual={dynamic_bottle_spec.visual_glb}"
-                f" scene_pos={np.round(self.bottle_pos, 6).tolist()}"
-                f" body_pos={np.round(dynamic_bottle_spec.pos, 6).tolist()}"
-                f" body_rpy={np.round(dynamic_bottle_spec.rpy_deg, 6).tolist()}"
-                f" radius={dynamic_bottle_spec.radius:g}"
-                f" height={dynamic_bottle_spec.height:g}"
-                f" mass={dynamic_bottle_spec.mass:g}"
-                f" friction={dynamic_bottle_spec.friction:g}"
-                f" margin={args.dynamic_bottle_contact_margin:g}"
-                f" gap={args.dynamic_bottle_contact_gap:g}"
-                f" torsional_friction={args.dynamic_bottle_torsional_friction:g}"
-                f" rolling_friction={args.dynamic_bottle_rolling_friction:g}"
-                " material=plastic"
-            )
+            if dynamic_object_proxy is not None:
+                half_extents = dynamic_object_proxy.half_extents
+                visual_text = str(dynamic_object_proxy.visual_glb) if dynamic_object_proxy.visual_glb is not None else "box"
+                radius_text = (
+                    f" radius={dynamic_object_proxy.radius:g}"
+                    if dynamic_object_proxy.radius is not None
+                    else f" size={[2.0 * float(v) for v in half_extents]}"
+                )
+                height_text = f" height={dynamic_object_proxy.height:g}" if dynamic_object_proxy.height is not None else ""
+                print(
+                    "Loaded dynamic object:"
+                    f" shape={dynamic_object_proxy.shape}"
+                    f" spec={self.dynamic_bottle_spec_path}"
+                    f" visual={visual_text}"
+                    f" scene_pos={np.round(self.bottle_pos, 6).tolist()}"
+                    f" body_pos={np.round(dynamic_object_proxy.pos, 6).tolist()}"
+                    f" body_rpy={np.round(dynamic_object_proxy.rpy_deg, 6).tolist()}"
+                    f"{radius_text}"
+                    f"{height_text}"
+                    f" mass={dynamic_object_proxy.mass:g}"
+                    f" friction={dynamic_object_proxy.friction:g}"
+                    f" margin={args.dynamic_bottle_contact_margin:g}"
+                    f" gap={args.dynamic_bottle_contact_gap:g}"
+                    f" torsional_friction={args.dynamic_bottle_torsional_friction:g}"
+                    f" rolling_friction={args.dynamic_bottle_rolling_friction:g}"
+                )
             if self._bottle_table_guard is not None:
                 guard = self._bottle_table_guard
                 print(
                     "Bottle table guard:"
                     f" xy=({guard.min_x:.4f},{guard.max_x:.4f})x({guard.min_y:.4f},{guard.max_y:.4f})"
                     f" top_z={guard.top_z:.6f}"
-                    f" radius={guard.radius:g}"
-                    f" half_height={guard.half_height:g}"
+                    f" half_extents={list(guard.half_extents)}"
                     f" sliding_friction={guard.sliding_friction:g}"
                     f" clearance={args.bottle_table_guard_clearance:g}"
                 )
@@ -1337,16 +1556,34 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
         self.contacts = self.model.contacts()
-        self.solver = (
-            newton.solvers.SolverXPBD(
-                self.model,
-                iterations=args.solver_iterations,
-                rigid_contact_relaxation=float(args.rigid_contact_relaxation),
-                angular_damping=float(args.angular_damping),
-            )
-            if self.simulate_enabled
-            else None
-        )
+        self.solver = None
+        if self.simulate_enabled:
+            if args.solver_backend == "mujoco":
+                self.solver = newton.solvers.SolverMuJoCo(
+                    self.model,
+                    use_mujoco_contacts=False,
+                    solver="newton",
+                    integrator="implicitfast",
+                    cone="elliptic",
+                    njmax=500,
+                    nconmax=500,
+                    iterations=args.mujoco_solver_iterations,
+                    ls_iterations=args.mujoco_ls_iterations,
+                    impratio=args.mujoco_impratio,
+                )
+            elif args.solver_backend == "xpbd":
+                print(
+                    "Warning: --solver-backend xpbd does not enforce joint_effort_limit/"
+                    "joint_armature/joint_target_mode; dynamic drive grasping is less physical."
+                )
+                self.solver = newton.solvers.SolverXPBD(
+                    self.model,
+                    iterations=args.solver_iterations,
+                    rigid_contact_relaxation=float(args.rigid_contact_relaxation),
+                    angular_damping=float(args.angular_damping),
+                )
+            else:
+                raise ValueError(f"Unsupported solver backend: {args.solver_backend!r}")
         self._l10_bottle_contact_frame = 0
         self._l10_bottle_contact_log_file = None
         self._l10_bottle_contact_log_path = _resolve_output_path(args.l10_bottle_contact_log_path)
@@ -1622,8 +1859,9 @@ class Example:
                 guard.min_y,
                 guard.max_y,
                 guard.top_z,
-                guard.radius,
-                guard.half_height,
+                float(guard.half_extents[0]),
+                float(guard.half_extents[1]),
+                float(guard.half_extents[2]),
                 float(self.args.bottle_table_guard_clearance),
                 guard.sliding_friction,
                 abs(float(self.args.gravity)),
@@ -1707,6 +1945,7 @@ class Example:
             self,
             NewtonRuntimeRobotConfig(
                 arm_side=args.teleop_arm_side,
+                publish_mode="state" if args.robot_kinematic else "drive_target",
                 drive_ik=bool(args.teleop_drive_ik),
                 relative_control=bool(args.teleop_relative_control),
                 eef_body_suffix_by_side={
@@ -2135,6 +2374,30 @@ class Example:
             help="XPBD iterations per substep.",
         )
         parser.add_argument(
+            "--solver-backend",
+            choices=("mujoco", "xpbd"),
+            default="mujoco",
+            help="Physics solver backend. MuJoCo honors finite joint effort limits for dynamic drive grasping.",
+        )
+        parser.add_argument(
+            "--mujoco-solver-iterations",
+            type=int,
+            default=15,
+            help="MuJoCo Newton solver iterations per substep.",
+        )
+        parser.add_argument(
+            "--mujoco-ls-iterations",
+            type=int,
+            default=100,
+            help="MuJoCo line-search iterations per substep.",
+        )
+        parser.add_argument(
+            "--mujoco-impratio",
+            type=float,
+            default=1000.0,
+            help="MuJoCo constraint impedance ratio for elliptic friction cones.",
+        )
+        parser.add_argument(
             "--rigid-gap",
             type=float,
             default=DEFAULT_RIGID_GAP_M,
@@ -2156,7 +2419,7 @@ class Example:
             "--simulate",
             action=argparse.BooleanOptionalAction,
             default=True,
-            help="Run XPBD simulation so the dynamic bottle can fall, contact, and be grasped.",
+            help="Run rigid-body simulation so the dynamic bottle can fall, contact, and be grasped.",
         )
         parser.add_argument(
             "--gravity",
@@ -2177,7 +2440,7 @@ class Example:
         parser.add_argument(
             "--robot-kinematic",
             action=argparse.BooleanOptionalAction,
-            default=True,
+            default=False,
             help="Treat the imported URDF robot as kinematic/infinite-mass while keeping L10 collision shapes active.",
         )
         parser.add_argument(
@@ -2231,6 +2494,54 @@ class Example:
             type=float,
             default=1.0,
             help="Default joint target damping.",
+        )
+        parser.add_argument(
+            "--drive-arm-target-ke",
+            type=float,
+            default=650.0,
+            help="Dynamic-drive Nero arm position stiffness.",
+        )
+        parser.add_argument(
+            "--drive-arm-target-kd",
+            type=float,
+            default=100.0,
+            help="Dynamic-drive Nero arm position damping.",
+        )
+        parser.add_argument(
+            "--drive-arm-effort-limit",
+            type=float,
+            default=80.0,
+            help="Dynamic-drive Nero arm joint effort limit.",
+        )
+        parser.add_argument(
+            "--drive-arm-armature",
+            type=float,
+            default=0.1,
+            help="Dynamic-drive Nero arm joint armature.",
+        )
+        parser.add_argument(
+            "--drive-hand-target-ke",
+            type=float,
+            default=150.0,
+            help="Dynamic-drive L10 hand position stiffness.",
+        )
+        parser.add_argument(
+            "--drive-hand-target-kd",
+            type=float,
+            default=5.0,
+            help="Dynamic-drive L10 hand position damping.",
+        )
+        parser.add_argument(
+            "--drive-hand-effort-limit",
+            type=float,
+            default=3.0,
+            help="Dynamic-drive L10 hand joint effort limit.",
+        )
+        parser.add_argument(
+            "--drive-hand-armature",
+            type=float,
+            default=0.02,
+            help="Dynamic-drive L10 hand joint armature.",
         )
         parser.add_argument(
             "--friction",
@@ -2300,6 +2611,12 @@ class Example:
             help="Dynamic bottle JSON spec with a GLB visual and transparent cylinder collision.",
         )
         parser.add_argument(
+            "--dynamic-object-shape",
+            choices=("cylinder", "box"),
+            default="cylinder",
+            help="Dynamic grasp object collision shape. cylinder uses --dynamic-bottle-spec; box uses --dynamic-box-size-*.",
+        )
+        parser.add_argument(
             "--l10-bottle-contact-log-path",
             type=Path,
             default=DEFAULT_L10_BOTTLE_CONTACT_LOG,
@@ -2340,6 +2657,24 @@ class Example:
             type=float,
             default=REALISTIC_BOTTLE_MASS_KG,
             help="Dynamic bottle mass [kg].",
+        )
+        parser.add_argument(
+            "--dynamic-box-size-x",
+            type=float,
+            default=DYNAMIC_CUBE_SIZE_M[0],
+            help="Dynamic box X size [m] when --dynamic-object-shape box is used.",
+        )
+        parser.add_argument(
+            "--dynamic-box-size-y",
+            type=float,
+            default=DYNAMIC_CUBE_SIZE_M[1],
+            help="Dynamic box Y size [m] when --dynamic-object-shape box is used.",
+        )
+        parser.add_argument(
+            "--dynamic-box-size-z",
+            type=float,
+            default=DYNAMIC_CUBE_SIZE_M[2],
+            help="Dynamic box Z size [m] when --dynamic-object-shape box is used.",
         )
         parser.add_argument(
             "--dynamic-bottle-contact-margin",

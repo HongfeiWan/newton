@@ -21,20 +21,14 @@ assets by path *.svg 2.15 KiB
   asset play-circle.svg 402 bytes [compared for emit] [from: public/play-circle.svg] [copied]
   asset arrow-uturn-left.svg 380 bytes [compared for emit] [from: public/arrow-uturn-left.svg] [copied]
 assets by status 35.7 MiB [emitted]
-  asset bundle.f3693074.js 35.7 MiB [emitted] [immutable] (name: main)
+  asset bundle.e7c6fdd9.js 35.7 MiB [emitted] [immutable] (name: main)
   asset index.html 33.3 KiB [emitted] [compared for emit]
 asset favicon.ico 13.9 KiB [compared for emit] [from: favicon.ico] [copied]
 asset HEROICONS_LICENSE 1.05 KiB [compared for emit] [from: public/HEROICONS_LICENSE] [copied]
 cached modules 22 MiB (javascript) 40.9 KiB (asset) [cached] 2302 modules
 runtime modules 33.1 KiB 17 modules
 ./src/BuildInfoOverlay.tsx 1.5 KiB [built] [code generated]
-webpack 5.107.2 compiled successfully in 3503 ms
-Watchpack Error (watcher): Error: ENOSPC: System limit for number of file watchers reached, watch '/app/webxr_client/node_modules/@bufbuild/protobuf/dist/esm/wkt'
-Watchpack Error (watcher): Error: ENOSPC: System limit for number of file watchers reached, watch '/app/webxr_client/node_modules/object-assign'
-Watchpack Error (watcher): Error: ENOSPC: System limit for number of file watchers reached, watch '/app/webxr_client/node_modules/ts-loader'
-Watchpack Error (watcher): Error: ENOSPC: System limit for number of file watchers reached, watch '/app/webxr_client/node_modules/object-assign'
-Watchpack Error (watcher): Error: ENOSPC: System limit for number of file watchers reached, watch '/app/webxr_client/node_modules/ts-loader'
-Watchpack Error (watcher): Error: ENOSPC: System limit for number of file watchers reached, watch '/app/webxr_client/node_modules/@bufbuild/protobuf/dist/esm/wkt'
+webpack 5.107.2 compiled successfully in 3783 ms
 <i> [webpack-dev-server] [HPM] Upgrading to WebSocket
 (node:21) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
 (Use `node --trace-deprecation ...` to show where the warning was created)
