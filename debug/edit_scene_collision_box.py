@@ -28,6 +28,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCENE_GLB = REPO_ROOT / "scene" / "scene.glb"
 DEFAULT_OUTPUT = REPO_ROOT / "debug" / "scene_collision_boxes.json"
 SPEC_FORMAT = "newton_scene_collision_boxes_v1"
+BOX_POSITION_MIN_M = -1.0
+BOX_POSITION_MAX_M = 1.0
+BOX_POSITION_STEP_M = 0.01
 
 
 @dataclass
@@ -49,6 +52,12 @@ def _positive_float(value: str) -> float:
     if not math.isfinite(result) or result <= 0.0:
         raise argparse.ArgumentTypeError("must be a finite value greater than 0")
     return result
+
+
+def _quantize_box_position(value: float) -> float:
+    value = min(max(float(value), BOX_POSITION_MIN_M), BOX_POSITION_MAX_M)
+    snapped = round(value / BOX_POSITION_STEP_M) * BOX_POSITION_STEP_M
+    return min(max(snapped, BOX_POSITION_MIN_M), BOX_POSITION_MAX_M)
 
 
 def _resolve_path(path: Path, *, base: Path | None = None) -> Path:
@@ -286,6 +295,7 @@ class Example:
     def apply_preview_update(self) -> None:
         self._dirty = False
         self.spec.box_size = [max(float(v), 1.0e-4) for v in self.spec.box_size]
+        self.spec.box_pos = [_quantize_box_position(v) for v in self.spec.box_pos]
         self.spec.scene_scale = max(float(self.spec.scene_scale), 1.0e-6)
         pos, quat = self.box_world_pose()
         self._shape_transform_host[self.box_shape, :] = (*pos.tolist(), *quat)
@@ -359,9 +369,15 @@ class Example:
 
         imgui.separator()
         for axis, index in (("Position X [m]", 0), ("Position Y [m]", 1), ("Position Z [m]", 2)):
-            updated, value = imgui.slider_float(axis, float(self.spec.box_pos[index]), -3.0, 3.0, "%.4f")
+            updated, value = imgui.slider_float(
+                axis,
+                float(self.spec.box_pos[index]),
+                BOX_POSITION_MIN_M,
+                BOX_POSITION_MAX_M,
+                "%.2f",
+            )
             if updated:
-                self.spec.box_pos[index] = value
+                self.spec.box_pos[index] = _quantize_box_position(value)
                 changed = True
 
         imgui.separator()

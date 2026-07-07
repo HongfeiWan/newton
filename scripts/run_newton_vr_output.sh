@@ -137,6 +137,25 @@ v4l2_reload_hint() {
     status_warn "sudo modprobe v4l2loopback video_nr=${video_nr} card_label=teleop_sim_screen exclusive_caps=1 max_buffers=2 max_width=1920 max_height=1080"
 }
 
+cloudxr_ipc_ready() {
+    local socket_path="$1"
+    [[ -S "$socket_path" ]] || return 1
+    [[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]] || return 0
+    "$PYTHON_BIN" - "$socket_path" >/dev/null 2>&1 <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(0.5)
+try:
+    sock.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+PY
+}
+
 check_v4l2_output_device() {
     if [[ ! -e "$DEVICE" ]]; then
         status_error "sim screen device missing: $DEVICE"
@@ -150,10 +169,16 @@ check_v4l2_output_device() {
         return
     fi
 
-    local device_info
+    local device_info output_fmt
+    output_fmt="$(v4l2-ctl -d "$DEVICE" --get-fmt-video-out 2>&1 || true)"
     device_info="$(v4l2-ctl -d "$DEVICE" --all 2>&1 || true)"
-    if ! grep -Eq "Video Output|Video Output Multiplanar" <<<"$device_info"; then
+    if grep -Eq "Width/Height|Pixel Format" <<<"$output_fmt" \
+        || grep -Eq "Video Output|Video Output Multiplanar" <<<"$device_info"; then
+        status_ok "sim screen output capability=V4L2 output"
+    else
         status_error "$DEVICE is not advertising V4L2 output capability; ffmpeg cannot feed the sim screen"
+        status_warn "current output format query:"
+        sed -n '1,12p' <<<"$output_fmt" >&2
         status_warn "current v4l2-ctl summary:"
         sed -n '1,35p' <<<"$device_info" >&2
         v4l2_reload_hint
@@ -200,7 +225,7 @@ else
     status_error "docker command not found; IsaacTeleop camera_streamer.sh run requires Docker"
 fi
 
-if [[ -n "${NV_CXR_RUNTIME_DIR:-}" && -S "${NV_CXR_RUNTIME_DIR}/ipc_cloudxr" ]]; then
+if [[ -n "${NV_CXR_RUNTIME_DIR:-}" ]] && cloudxr_ipc_ready "${NV_CXR_RUNTIME_DIR}/ipc_cloudxr"; then
     status_ok "CloudXR IPC=${NV_CXR_RUNTIME_DIR}/ipc_cloudxr"
 else
     status_error "CloudXR runtime is not ready. Start: python -m isaacteleop.cloudxr --accept-eula"

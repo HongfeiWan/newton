@@ -63,7 +63,7 @@ class NewtonRuntimeRobotConfig:
     openxr_yaw_recenter: bool = True
     finite_difference_rad: float = 1.0e-4
     hand_max_joint_step_rad: float = 0.0
-    hand_publish_kinematic_velocity: bool = False
+    hand_publish_kinematic_velocity: bool = True
     mapping: NeroTeleopMappingConfig = field(default_factory=NeroTeleopMappingConfig)
     ik_config_overrides: dict[str, object] = field(default_factory=dict)
 

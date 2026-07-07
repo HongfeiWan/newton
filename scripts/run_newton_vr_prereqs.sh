@@ -267,9 +267,15 @@ fi
 if [[ -e /dev/video44 ]]; then
     check_ok "sim screen device=/dev/video44"
     if command -v v4l2-ctl >/dev/null 2>&1; then
+        video44_output_fmt="$(v4l2-ctl -d /dev/video44 --get-fmt-video-out 2>&1 || true)"
         video44_info="$(v4l2-ctl -d /dev/video44 --all 2>&1 || true)"
-        if ! grep -Eq "Video Output|Video Output Multiplanar" <<<"${video44_info}"; then
+        if grep -Eq "Width/Height|Pixel Format" <<<"${video44_output_fmt}" \
+            || grep -Eq "Video Output|Video Output Multiplanar" <<<"${video44_info}"; then
+            check_ok "sim screen output capability=V4L2 output"
+        else
             check_error "/dev/video44 is present but is not a V4L2 output device"
+            check_warn "current output format query:"
+            sed -n '1,12p' <<<"${video44_output_fmt}" >&2
             check_warn "reload it with:"
             check_warn "sudo modprobe -r v4l2loopback"
             check_warn "sudo modprobe v4l2loopback video_nr=44 card_label=teleop_sim_screen exclusive_caps=1 max_buffers=2 max_width=1920 max_height=1080"
@@ -342,6 +348,60 @@ require_bg_alive() {
     exit 1
 }
 
+cloudxr_ipc_ready() {
+    local socket_path="$1"
+    [[ -S "${socket_path}" ]] || return 1
+    [[ -n "${TELEOP_PYTHON_BIN}" && -x "${TELEOP_PYTHON_BIN}" ]] || return 0
+    "${TELEOP_PYTHON_BIN}" - "${socket_path}" >/dev/null 2>&1 <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(0.5)
+try:
+    sock.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+finally:
+    sock.close()
+PY
+}
+
+stop_stale_cloudxr_runtimes() {
+    local socket_path="$1"
+    local runtime_user="${USER:-$(id -un)}"
+    local pids=()
+    local pid
+    mapfile -t pids < <(pgrep -u "${runtime_user}" -f 'python.*-m isaacteleop.cloudxr' || true)
+    if [[ "${#pids[@]}" -eq 0 ]]; then
+        return
+    fi
+
+    warn "stopping stale CloudXR runtime process(es): ${pids[*]}"
+    for pid in "${pids[@]}"; do
+        kill "${pid}" >/dev/null 2>&1 || true
+    done
+
+    for _ in {1..20}; do
+        local alive=0
+        for pid in "${pids[@]}"; do
+            if kill -0 "${pid}" >/dev/null 2>&1; then
+                alive=1
+                break
+            fi
+        done
+        [[ "${alive}" -eq 0 ]] && break
+        sleep 0.25
+    done
+
+    if [[ -e "${socket_path}" ]]; then
+        if ! cloudxr_ipc_ready "${socket_path}"; then
+            warn "removing stale CloudXR IPC socket: ${socket_path}"
+            rm -f "${socket_path}"
+        fi
+    fi
+}
+
 stop_all() {
     local exit_code=$?
     trap - EXIT INT TERM
@@ -367,12 +427,22 @@ wait_for_socket() {
     local socket_path="$1"
     local label="$2"
     local timeout_s="$3"
+    local pid="${4:-}"
+    local log_path="${5:-}"
     local started
     started="$(date +%s)"
     while true; do
-        if [[ -S "${socket_path}" ]]; then
+        if cloudxr_ipc_ready "${socket_path}"; then
             ok "${label} is ready: ${socket_path}"
             return 0
+        fi
+        if [[ -n "${pid}" ]] && ! kill -0 "${pid}" >/dev/null 2>&1; then
+            err "${label} exited before becoming ready"
+            if [[ -n "${log_path}" ]]; then
+                err "recent ${label} log:"
+                tail -80 "${log_path}" >&2 || true
+            fi
+            return 1
         fi
         if (( $(date +%s) - started >= timeout_s )); then
             err "${label} did not become ready within ${timeout_s}s: ${socket_path}"
@@ -421,10 +491,6 @@ wait_for_https() {
 }
 
 if [[ "${START_CLOUDXR}" -eq 1 ]]; then
-    start_bg "cloudxr_runtime" "${TELEOP_PYTHON_BIN}" -m isaacteleop.cloudxr --accept-eula
-    cloudxr_pid="$(last_bg_pid)"
-    wait_for_socket "${NV_CXR_RUNTIME_DIR:-${HOME}/.cloudxr/run}/ipc_cloudxr" "CloudXR runtime" 90
-    require_bg_alive "cloudxr_runtime" "${cloudxr_pid}"
     if [[ -f "${XR_ENV_PATH}" ]]; then
         set -a
         # shellcheck disable=SC1090
@@ -433,6 +499,16 @@ if [[ "${START_CLOUDXR}" -eq 1 ]]; then
         ok "CloudXR env loaded: ${XR_ENV_PATH}"
     fi
     export NV_CXR_RUNTIME_DIR="${NV_CXR_RUNTIME_DIR:-${HOME}/.cloudxr/run}"
+    cloudxr_ipc_path="${NV_CXR_RUNTIME_DIR}/ipc_cloudxr"
+    if cloudxr_ipc_ready "${cloudxr_ipc_path}"; then
+        ok "CloudXR runtime already ready: ${cloudxr_ipc_path}"
+    else
+        stop_stale_cloudxr_runtimes "${cloudxr_ipc_path}"
+        start_bg "cloudxr_runtime" "${TELEOP_PYTHON_BIN}" -m isaacteleop.cloudxr --accept-eula
+        cloudxr_pid="$(last_bg_pid)"
+        wait_for_socket "${cloudxr_ipc_path}" "CloudXR runtime" 90 "${cloudxr_pid}" "${LOG_DIR}/cloudxr_runtime.log"
+        require_bg_alive "cloudxr_runtime" "${cloudxr_pid}"
+    fi
 else
     warn "skipping CloudXR runtime"
 fi

@@ -21,23 +21,16 @@ assets by path *.svg 2.15 KiB
   asset play-circle.svg 402 bytes [compared for emit] [from: public/play-circle.svg] [copied]
   asset arrow-uturn-left.svg 380 bytes [compared for emit] [from: public/arrow-uturn-left.svg] [copied]
 assets by status 35.7 MiB [emitted]
-  asset bundle.63b05884.js 35.7 MiB [emitted] [immutable] (name: main)
+  asset bundle.e70dd009.js 35.7 MiB [emitted] [immutable] (name: main)
   asset index.html 33.3 KiB [emitted] [compared for emit]
 asset favicon.ico 13.9 KiB [compared for emit] [from: favicon.ico] [copied]
 asset HEROICONS_LICENSE 1.05 KiB [compared for emit] [from: public/HEROICONS_LICENSE] [copied]
 cached modules 22 MiB (javascript) 40.9 KiB (asset) [cached] 2302 modules
 runtime modules 33.1 KiB 17 modules
 ./src/BuildInfoOverlay.tsx 1.5 KiB [built] [code generated]
-webpack 5.107.2 compiled successfully in 3467 ms
+webpack 5.107.2 compiled successfully in 3478 ms
 <i> [webpack-dev-server] [HPM] Upgrading to WebSocket
 (node:21) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
 (Use `node --trace-deprecation ...` to show where the warning was created)
-<i> [webpack-dev-server] [HPM] Client disconnected
-<e> [webpack-dev-server] [HPM] WebSocket error: Error: read EHOSTUNREACH
-<e>     at TLSWrap.onStreamRead (node:internal/stream_base_commons:216:20) {
-<e>   errno: -113,
-<e>   code: 'EHOSTUNREACH',
-<e>   syscall: 'read'
-<e> }
 
 got 3 SIGTERM/SIGINTs, forcefully exiting
