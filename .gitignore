@@ -87,3 +87,5 @@ docs/_static/viser/
 /humanoid_recording.bin
 /my_output.usd
 /solver_convergence.png
+
+*.log

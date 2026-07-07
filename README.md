@@ -5,6 +5,8 @@
 如果 `/dev/video44` 已存在，可以跳过。
 
 ```bash
+sudo modprobe -r v4l2loopback
+
 sudo modprobe v4l2loopback video_nr=44 card_label=teleop_sim_screen exclusive_caps=1 max_buffers=2
 ```
 
