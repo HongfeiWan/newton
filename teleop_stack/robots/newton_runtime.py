@@ -8,7 +8,9 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.sim.ik.ik_common import eval_fk_batched as _eval_fk_batched
 from teleop_stack.ik.differential_ik import PositionJacobian, SpatialJacobian
+from teleop_stack.ik.full_pose import solve_full_pose_damped_least_squares_step
 from teleop_stack.ik.full_pose_controller import (
     FullPoseDifferentialIkController,
     FullPoseDifferentialIkControllerConfig,
@@ -53,6 +55,231 @@ if TYPE_CHECKING:
 
 _FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
 _FINGER_COUNT = len(_FINGER_NAMES)
+
+
+@wp.kernel(enable_backward=False)
+def _extract_eef_pose_batch_kernel(
+    body_q: wp.array2d[wp.transform],
+    eef_body_index: int,
+    pose_out: wp.array2d[wp.float32],
+):
+    batch_index = wp.tid()
+    eef_transform = body_q[batch_index, eef_body_index]
+    position = wp.transform_get_translation(eef_transform)
+    rotation = wp.transform_get_rotation(eef_transform)
+    pose_out[batch_index, 0] = position[0]
+    pose_out[batch_index, 1] = position[1]
+    pose_out[batch_index, 2] = position[2]
+    pose_out[batch_index, 3] = rotation[0]
+    pose_out[batch_index, 4] = rotation[1]
+    pose_out[batch_index, 5] = rotation[2]
+    pose_out[batch_index, 6] = rotation[3]
+
+
+@wp.kernel(enable_backward=False)
+def _full_pose_dls_solve_kernel(
+    spatial_jacobian: wp.array2d[wp.float32],
+    position_error_xyz: wp.array[wp.float32],
+    orientation_error_rotvec: wp.array[wp.float32],
+    bias_step: wp.array[wp.float32],
+    has_bias_step: int,
+    damping_lambda: float,
+    position_weight: float,
+    orientation_weight: float,
+    max_position_step_m: float,
+    max_rotation_step_rad: float,
+    bias_weight: float,
+    system: wp.array2d[wp.float32],
+    cholesky: wp.array2d[wp.float32],
+    rhs: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    dq_out: wp.array[wp.float32],
+    status: wp.array[wp.int32],
+    current_q: wp.array[wp.float32],
+    previous_velocity: wp.array[wp.float32],
+    lower_limits: wp.array[wp.float32],
+    upper_limits: wp.array[wp.float32],
+    arm_joint_q_indices: wp.array[wp.int32],
+    arm_joint_qd_indices: wp.array[wp.int32],
+    target_joint_q: wp.array[wp.float32],
+    target_joint_qd: wp.array[wp.float32],
+    has_previous_velocity: int,
+    max_joint_step_rad: float,
+    max_joint_velocity_rad_s: float,
+    max_joint_acceleration_rad_s2: float,
+    dt_s: float,
+    write_joint_targets: int,
+    q_cmd_out: wp.array[wp.float32],
+    dq_cmd_out: wp.array[wp.float32],
+    unclipped_q_cmd_out: wp.array[wp.float32],
+    flags_out: wp.array[wp.int32],
+):
+    flags_out[0] = int(0)
+    flags_out[1] = int(0)
+
+    pos_norm = wp.sqrt(
+        position_error_xyz[0] * position_error_xyz[0]
+        + position_error_xyz[1] * position_error_xyz[1]
+        + position_error_xyz[2] * position_error_xyz[2]
+    )
+    pos_scale = float(1.0)
+    if max_position_step_m > 0.0 and pos_norm > max_position_step_m and pos_norm > 1.0e-12:
+        pos_scale = max_position_step_m / pos_norm
+
+    rot_norm = wp.sqrt(
+        orientation_error_rotvec[0] * orientation_error_rotvec[0]
+        + orientation_error_rotvec[1] * orientation_error_rotvec[1]
+        + orientation_error_rotvec[2] * orientation_error_rotvec[2]
+    )
+    rot_scale = float(1.0)
+    if max_rotation_step_rad > 0.0 and rot_norm > max_rotation_step_rad and rot_norm > 1.0e-12:
+        rot_scale = max_rotation_step_rad / rot_norm
+
+    diagonal_regularization = wp.max(float(0.0), damping_lambda)
+    diagonal_regularization = diagonal_regularization * diagonal_regularization + wp.max(float(0.0), bias_weight)
+
+    i = int(0)
+    while i < 7:
+        rhs[i] = float(0.0)
+        j = int(0)
+        while j < 7:
+            system[i, j] = float(0.0)
+            cholesky[i, j] = float(0.0)
+            j = j + 1
+        i = i + 1
+
+    row = int(0)
+    while row < 6:
+        weight = position_weight
+        task_delta = position_weight * position_error_xyz[row] * pos_scale
+        if row >= 3:
+            weight = orientation_weight
+            task_delta = orientation_weight * orientation_error_rotvec[row - 3] * rot_scale
+
+        col = int(0)
+        while col < 7:
+            j_col = spatial_jacobian[row, col] * weight
+            rhs[col] = rhs[col] + j_col * task_delta
+            other_col = int(0)
+            while other_col < 7:
+                system[col, other_col] = system[col, other_col] + j_col * spatial_jacobian[row, other_col] * weight
+                other_col = other_col + 1
+            col = col + 1
+        row = row + 1
+
+    i = int(0)
+    while i < 7:
+        system[i, i] = system[i, i] + diagonal_regularization
+        if has_bias_step != 0 and bias_weight > 0.0:
+            rhs[i] = rhs[i] + bias_weight * bias_step[i]
+        i = i + 1
+
+    success = int(1)
+    i = int(0)
+    while i < 7:
+        j = int(0)
+        while j <= i:
+            subtotal = float(0.0)
+            k = int(0)
+            while k < j:
+                subtotal = subtotal + cholesky[i, k] * cholesky[j, k]
+                k = k + 1
+            if i == j:
+                diagonal = system[i, i] - subtotal
+                if diagonal <= 1.0e-12:
+                    success = int(0)
+                if success != 0:
+                    cholesky[i, j] = wp.sqrt(diagonal)
+            else:
+                denominator = cholesky[j, j]
+                if wp.abs(denominator) <= 1.0e-12:
+                    success = int(0)
+                if success != 0:
+                    cholesky[i, j] = (system[i, j] - subtotal) / denominator
+            j = j + 1
+        i = i + 1
+
+    if success == 0:
+        i = int(0)
+        while i < 7:
+            dq_out[i] = float(0.0)
+            q_cmd_out[i] = current_q[i]
+            dq_cmd_out[i] = float(0.0)
+            unclipped_q_cmd_out[i] = current_q[i]
+            i = i + 1
+        status[0] = int(0)
+        return
+
+    i = int(0)
+    while i < 7:
+        subtotal = float(0.0)
+        k = int(0)
+        while k < i:
+            subtotal = subtotal + cholesky[i, k] * y[k]
+            k = k + 1
+        y[i] = (rhs[i] - subtotal) / cholesky[i, i]
+        i = i + 1
+
+    ii = int(0)
+    while ii < 7:
+        i = 6 - ii
+        subtotal = float(0.0)
+        k = i + 1
+        while k < 7:
+            subtotal = subtotal + cholesky[k, i] * dq_out[k]
+            k = k + 1
+        dq_out[i] = (y[i] - subtotal) / cholesky[i, i]
+        ii = ii + 1
+
+    if write_joint_targets != 0:
+        safe_dt = wp.max(float(1.0e-6), dt_s)
+        allowed_step = wp.max(float(0.0), max_joint_step_rad)
+        safe_velocity = wp.max(float(0.0), max_joint_velocity_rad_s)
+        if safe_velocity > 0.0 and safe_dt > 0.0:
+            velocity_step = safe_velocity * safe_dt
+            if allowed_step > 0.0:
+                allowed_step = wp.min(allowed_step, velocity_step)
+            else:
+                allowed_step = velocity_step
+
+        max_delta_velocity = wp.max(float(0.0), max_joint_acceleration_rad_s2) * safe_dt
+        i = int(0)
+        while i < 7:
+            step = dq_out[i]
+            if allowed_step <= 0.0:
+                step = float(0.0)
+            else:
+                step = wp.clamp(step, -allowed_step, allowed_step)
+
+            if has_previous_velocity != 0 and max_joint_acceleration_rad_s2 > 0.0:
+                desired_velocity = step / safe_dt
+                lower_velocity = previous_velocity[i] - max_delta_velocity
+                upper_velocity = previous_velocity[i] + max_delta_velocity
+                bounded_velocity = wp.clamp(desired_velocity, lower_velocity, upper_velocity)
+                if wp.abs(bounded_velocity - desired_velocity) > 1.0e-12:
+                    flags_out[0] = int(1)
+                step = bounded_velocity * safe_dt
+
+            unclipped_q = current_q[i] + step
+            q_cmd = wp.clamp(unclipped_q, lower_limits[i], upper_limits[i])
+            if wp.abs(q_cmd - unclipped_q) > 1.0e-12:
+                flags_out[1] = int(1)
+
+            applied_step = q_cmd - current_q[i]
+            dq_cmd = applied_step / safe_dt
+            q_cmd_out[i] = q_cmd
+            dq_cmd_out[i] = dq_cmd
+            unclipped_q_cmd_out[i] = unclipped_q
+
+            q_index = arm_joint_q_indices[i]
+            if q_index >= 0:
+                target_joint_q[q_index] = q_cmd
+            qd_index = arm_joint_qd_indices[i]
+            if qd_index >= 0:
+                target_joint_qd[qd_index] = dq_cmd
+            i = i + 1
+
+    status[0] = int(1)
 
 
 @wp.kernel(enable_backward=False)
@@ -214,24 +441,50 @@ class NewtonLinkKinematicsModel:
         self.model = model
         self.side = side
         self.arm_joint_q_indices = tuple(int(v) for v in arm_joint_q_indices)
+        self._arm_joint_q_indices_np = np.asarray(self.arm_joint_q_indices, dtype=np.int64)
         self.eef_body_index = _find_body_index(model, eef_body_suffix)
         self.finite_difference_rad = max(abs(float(finite_difference_rad)), 1.0e-6)
-        self._kin_state = model.state()
         self._joint_q_host = model.joint_q.numpy().copy()
-        self._joint_qd_zero = wp.zeros_like(model.joint_qd)
+        self._fk_batch_size = 1 + 2 * len(self.arm_joint_q_indices)
+        self._joint_q_batch_host = np.zeros(
+            (self._fk_batch_size, int(model.joint_coord_count)),
+            dtype=np.float32,
+        )
+        self._joint_q_batch_wp = wp.zeros(
+            (self._fk_batch_size, int(model.joint_coord_count)),
+            dtype=wp.float32,
+            device=model.device,
+        )
+        self._joint_qd_batch_wp = wp.zeros(
+            (self._fk_batch_size, int(model.joint_dof_count)),
+            dtype=wp.float32,
+            device=model.device,
+        )
+        self._body_q_batch_wp = wp.empty(
+            (self._fk_batch_size, int(model.body_count)),
+            dtype=wp.transform,
+            device=model.device,
+        )
+        self._body_qd_batch_wp = wp.empty(
+            (self._fk_batch_size, int(model.body_count)),
+            dtype=wp.spatial_vector,
+            device=model.device,
+        )
+        self._eef_pose_batch_wp = wp.empty((self._fk_batch_size, 7), dtype=wp.float32, device=model.device)
         self._last_jacobian_q: tuple[float, ...] | None = None
         self._last_spatial_jacobian: SpatialJacobian | None = None
+        self._last_pose: Pose7 | None = None
 
     def sync_joint_q(self, joint_q: np.ndarray) -> None:
         self._joint_q_host = np.asarray(joint_q, dtype=np.float32).copy()
         self.clear_cache()
 
     def forward_pose(self, joint_positions_rad: tuple[float, ...]) -> Pose7:
-        position, quaternion_xyzw = self._pose_after_set(joint_positions_rad)
-        return Pose7(
-            position_xyz=tuple(float(v) for v in position),
-            quaternion_xyzw=tuple(float(v) for v in quaternion_xyzw),  # type: ignore[arg-type]
-        )
+        q = _require_seven_dof(joint_positions_rad)
+        if self._last_jacobian_q is None or not _same_joint_tuple(q, self._last_jacobian_q):
+            self._compute_pose_and_spatial_jacobian(q)
+        assert self._last_pose is not None
+        return self._last_pose
 
     def position_jacobian(self, joint_positions_rad: tuple[float, ...]) -> PositionJacobian:
         spatial = self.spatial_jacobian(joint_positions_rad)
@@ -247,15 +500,53 @@ class NewtonLinkKinematicsModel:
             assert self._last_spatial_jacobian is not None
             return self._last_spatial_jacobian
 
-        eps = self.finite_difference_rad
+        self._compute_pose_and_spatial_jacobian(q)
+        assert self._last_spatial_jacobian is not None
+        return self._last_spatial_jacobian
+
+    def _compute_pose_and_spatial_jacobian(self, q: tuple[float, ...]) -> None:
+        eps = float(self.finite_difference_rad)
+        q_np = np.asarray(q, dtype=np.float32)
+        self._joint_q_batch_host[:, :] = self._joint_q_host
+        self._joint_q_batch_host[:, self._arm_joint_q_indices_np] = q_np
+        for joint_index in range(7):
+            plus_row = 1 + joint_index
+            minus_row = 1 + 7 + joint_index
+            target_index = self.arm_joint_q_indices[joint_index]
+            self._joint_q_batch_host[plus_row, target_index] = np.float32(q[joint_index] + eps)
+            self._joint_q_batch_host[minus_row, target_index] = np.float32(q[joint_index] - eps)
+
+        self._joint_q_batch_wp.assign(self._joint_q_batch_host)
+        _eval_fk_batched(
+            self.model,
+            self._joint_q_batch_wp,
+            self._joint_qd_batch_wp,
+            self._body_q_batch_wp,
+            self._body_qd_batch_wp,
+        )
+        wp.launch(
+            kernel=_extract_eef_pose_batch_kernel,
+            dim=self._fk_batch_size,
+            inputs=[self._body_q_batch_wp, self.eef_body_index, self._eef_pose_batch_wp],
+            device=self.model.device,
+        )
+        pose_batch = self._eef_pose_batch_wp.numpy()
+
+        center = pose_batch[0]
+        center_quaternion = quat_normalize_xyzw(tuple(float(v) for v in center[3:7]))  # type: ignore[arg-type]
+        self._last_pose = Pose7(
+            position_xyz=tuple(float(v) for v in center[:3]),
+            quaternion_xyzw=center_quaternion,
+        )
+
         columns: list[tuple[float, float, float, float, float, float]] = []
         for joint_index in range(7):
-            q_plus = list(q)
-            q_minus = list(q)
-            q_plus[joint_index] += eps
-            q_minus[joint_index] -= eps
-            pos_plus, quat_plus = self._pose_after_set(tuple(q_plus))
-            pos_minus, quat_minus = self._pose_after_set(tuple(q_minus))
+            plus = pose_batch[1 + joint_index]
+            minus = pose_batch[1 + 7 + joint_index]
+            pos_plus = np.asarray(plus[:3], dtype=np.float64)
+            pos_minus = np.asarray(minus[:3], dtype=np.float64)
+            quat_plus = quat_normalize_xyzw(tuple(float(v) for v in plus[3:7]))  # type: ignore[arg-type]
+            quat_minus = quat_normalize_xyzw(tuple(float(v) for v in minus[3:7]))  # type: ignore[arg-type]
             linear = (pos_plus - pos_minus) / (2.0 * eps)
             quat_plus = quat_align_hemisphere_xyzw(quat_plus, quat_minus)
             delta_quat = quat_multiply_xyzw(quat_plus, quat_inverse_xyzw(quat_minus))
@@ -271,7 +562,6 @@ class NewtonLinkKinematicsModel:
                 )
             )
 
-        self._pose_after_set(q)
         spatial: SpatialJacobian = tuple(
             tuple(float(columns[col][row]) for col in range(7))
             for row in range(6)
@@ -283,22 +573,366 @@ class NewtonLinkKinematicsModel:
     def clear_cache(self) -> None:
         self._last_jacobian_q = None
         self._last_spatial_jacobian = None
+        self._last_pose = None
 
-    def _pose_after_set(self, joint_positions_rad: tuple[float, ...]) -> tuple[np.ndarray, QuaternionXYZW]:
-        q = _require_seven_dof(joint_positions_rad)
-        joint_q = self._joint_q_host.copy()
-        for target_index, value in zip(self.arm_joint_q_indices, q, strict=True):
-            joint_q[int(target_index)] = float(value)
-        newton.eval_fk(
-            self.model,
-            wp.array(joint_q, dtype=wp.float32, device=self.model.device),
-            self._joint_qd_zero,
-            self._kin_state,
+
+class NewtonGpuFullPoseDlsStepSolver:
+    def __init__(self, *, device: Any):
+        self.device = device
+        self.last_wrote_joint_targets = False
+        self._spatial_host = np.zeros((6, 7), dtype=np.float32)
+        self._position_error_host = np.zeros(3, dtype=np.float32)
+        self._orientation_error_host = np.zeros(3, dtype=np.float32)
+        self._bias_step_host = np.zeros(7, dtype=np.float32)
+        self._current_q_host = np.zeros(7, dtype=np.float32)
+        self._previous_velocity_host = np.zeros(7, dtype=np.float32)
+        self._lower_limits_host = np.zeros(7, dtype=np.float32)
+        self._upper_limits_host = np.zeros(7, dtype=np.float32)
+        self._spatial_wp = wp.zeros((6, 7), dtype=wp.float32, device=device)
+        self._position_error_wp = wp.zeros(3, dtype=wp.float32, device=device)
+        self._orientation_error_wp = wp.zeros(3, dtype=wp.float32, device=device)
+        self._bias_step_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._current_q_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._previous_velocity_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._lower_limits_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._upper_limits_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._system_wp = wp.zeros((7, 7), dtype=wp.float32, device=device)
+        self._cholesky_wp = wp.zeros((7, 7), dtype=wp.float32, device=device)
+        self._rhs_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._y_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._dq_out_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._status_wp = wp.zeros(1, dtype=wp.int32, device=device)
+        self._q_cmd_out_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._dq_cmd_out_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._unclipped_q_cmd_out_wp = wp.zeros(7, dtype=wp.float32, device=device)
+        self._flags_wp = wp.zeros(2, dtype=wp.int32, device=device)
+        self._arm_joint_q_indices_wp = wp.zeros(7, dtype=wp.int32, device=device)
+        self._arm_joint_qd_indices_wp = wp.zeros(7, dtype=wp.int32, device=device)
+        self._dummy_target_joint_q_wp = wp.zeros(1, dtype=wp.float32, device=device)
+        self._dummy_target_joint_qd_wp = wp.zeros(1, dtype=wp.float32, device=device)
+        self._target_joint_q_wp: wp.array | None = None
+        self._target_joint_qd_wp: wp.array | None = None
+
+    def configure_target_writer(
+        self,
+        *,
+        arm_joint_q_indices: tuple[int, ...],
+        arm_joint_qd_indices: tuple[int, ...],
+        target_joint_q: wp.array,
+        target_joint_qd: wp.array,
+    ) -> None:
+        if len(arm_joint_q_indices) != 7 or len(arm_joint_qd_indices) != 7:
+            raise ValueError("Newton GPU DLS target writer expects seven arm q and qd indices.")
+        self._arm_joint_q_indices_wp.assign(np.asarray(arm_joint_q_indices, dtype=np.int32))
+        self._arm_joint_qd_indices_wp.assign(np.asarray(arm_joint_qd_indices, dtype=np.int32))
+        self._target_joint_q_wp = target_joint_q
+        self._target_joint_qd_wp = target_joint_qd
+
+    def _upload_task_inputs(
+        self,
+        spatial_jacobian: SpatialJacobian,
+        *,
+        position_error_xyz: tuple[float, float, float],
+        orientation_error_rotvec: tuple[float, float, float],
+        bias_step: tuple[float, ...] | None,
+    ) -> int:
+        self._spatial_host[:, :] = np.asarray(spatial_jacobian, dtype=np.float32)
+        self._position_error_host[:] = np.asarray(position_error_xyz, dtype=np.float32)
+        self._orientation_error_host[:] = np.asarray(orientation_error_rotvec, dtype=np.float32)
+        has_bias_step = bias_step is not None
+        if has_bias_step:
+            self._bias_step_host[:] = np.asarray(bias_step, dtype=np.float32)
+        else:
+            self._bias_step_host.fill(0.0)
+
+        self._spatial_wp.assign(self._spatial_host)
+        self._position_error_wp.assign(self._position_error_host)
+        self._orientation_error_wp.assign(self._orientation_error_host)
+        self._bias_step_wp.assign(self._bias_step_host)
+        return 1 if has_bias_step else 0
+
+    def _launch_dls_kernel(
+        self,
+        *,
+        has_bias_step: int,
+        damping_lambda: float,
+        position_weight: float,
+        orientation_weight: float,
+        max_position_step_m: float | None,
+        max_rotation_step_rad: float | None,
+        bias_weight: float,
+        has_previous_velocity: int = 0,
+        max_joint_step_rad: float = 0.0,
+        max_joint_velocity_rad_s: float = 0.0,
+        max_joint_acceleration_rad_s2: float = 0.0,
+        dt_s: float = 0.0,
+        write_joint_targets: int = 0,
+    ) -> None:
+        target_joint_q = self._target_joint_q_wp if self._target_joint_q_wp is not None else self._dummy_target_joint_q_wp
+        target_joint_qd = self._target_joint_qd_wp if self._target_joint_qd_wp is not None else self._dummy_target_joint_qd_wp
+        wp.launch(
+            kernel=_full_pose_dls_solve_kernel,
+            dim=1,
+            inputs=[
+                self._spatial_wp,
+                self._position_error_wp,
+                self._orientation_error_wp,
+                self._bias_step_wp,
+                int(has_bias_step),
+                float(damping_lambda),
+                float(position_weight),
+                float(orientation_weight),
+                -1.0 if max_position_step_m is None else float(max_position_step_m),
+                -1.0 if max_rotation_step_rad is None else float(max_rotation_step_rad),
+                float(bias_weight),
+                self._system_wp,
+                self._cholesky_wp,
+                self._rhs_wp,
+                self._y_wp,
+                self._dq_out_wp,
+                self._status_wp,
+                self._current_q_wp,
+                self._previous_velocity_wp,
+                self._lower_limits_wp,
+                self._upper_limits_wp,
+                self._arm_joint_q_indices_wp,
+                self._arm_joint_qd_indices_wp,
+                target_joint_q,
+                target_joint_qd,
+                int(has_previous_velocity),
+                float(max_joint_step_rad),
+                float(max_joint_velocity_rad_s),
+                float(max_joint_acceleration_rad_s2),
+                float(dt_s),
+                int(write_joint_targets),
+                self._q_cmd_out_wp,
+                self._dq_cmd_out_wp,
+                self._unclipped_q_cmd_out_wp,
+                self._flags_wp,
+            ],
+            device=self.device,
         )
-        body_q = self._kin_state.body_q.numpy()[self.eef_body_index]
-        position = np.asarray(body_q[:3], dtype=np.float64)
-        quaternion_xyzw = quat_normalize_xyzw(tuple(float(v) for v in body_q[3:7]))  # type: ignore[arg-type]
-        return position, quaternion_xyzw
+
+    def solve_full_pose_step(
+        self,
+        spatial_jacobian: SpatialJacobian,
+        *,
+        position_error_xyz: tuple[float, float, float],
+        orientation_error_rotvec: tuple[float, float, float],
+        damping_lambda: float,
+        position_weight: float,
+        orientation_weight: float,
+        max_position_step_m: float | None,
+        max_rotation_step_rad: float | None,
+        bias_step: tuple[float, ...] | None,
+        bias_weight: float,
+    ) -> tuple[float, ...]:
+        self.last_wrote_joint_targets = False
+        has_bias_step = self._upload_task_inputs(
+            spatial_jacobian,
+            position_error_xyz=position_error_xyz,
+            orientation_error_rotvec=orientation_error_rotvec,
+            bias_step=bias_step,
+        )
+        self._launch_dls_kernel(
+            has_bias_step=has_bias_step,
+            damping_lambda=damping_lambda,
+            position_weight=position_weight,
+            orientation_weight=orientation_weight,
+            max_position_step_m=max_position_step_m,
+            max_rotation_step_rad=max_rotation_step_rad,
+            bias_weight=bias_weight,
+        )
+        if int(self._status_wp.numpy()[0]) == 1:
+            return tuple(float(v) for v in self._dq_out_wp.numpy())
+
+        return solve_full_pose_damped_least_squares_step(
+            spatial_jacobian,
+            position_error_xyz=position_error_xyz,
+            orientation_error_rotvec=orientation_error_rotvec,
+            damping_lambda=damping_lambda,
+            position_weight=position_weight,
+            orientation_weight=orientation_weight,
+            max_position_step_m=max_position_step_m,
+            max_rotation_step_rad=max_rotation_step_rad,
+            bias_step=bias_step,
+            bias_weight=bias_weight,
+        )
+
+    def solve_full_pose_joint_step(
+        self,
+        spatial_jacobian: SpatialJacobian,
+        *,
+        position_error_xyz: tuple[float, float, float],
+        orientation_error_rotvec: tuple[float, float, float],
+        damping_lambda: float,
+        position_weight: float,
+        orientation_weight: float,
+        max_position_step_m: float | None,
+        max_rotation_step_rad: float | None,
+        bias_step: tuple[float, ...] | None,
+        bias_weight: float,
+        current_q: tuple[float, ...],
+        previous_velocity_rad_s: tuple[float, ...] | None,
+        lower_limits_rad: tuple[float, ...],
+        upper_limits_rad: tuple[float, ...],
+        max_joint_step_rad: float,
+        max_joint_velocity_rad_s: float,
+        max_joint_acceleration_rad_s2: float,
+        dt_s: float,
+    ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], bool, bool]:
+        self.last_wrote_joint_targets = False
+        if self._target_joint_q_wp is None or self._target_joint_qd_wp is None:
+            dq_step = self.solve_full_pose_step(
+                spatial_jacobian,
+                position_error_xyz=position_error_xyz,
+                orientation_error_rotvec=orientation_error_rotvec,
+                damping_lambda=damping_lambda,
+                position_weight=position_weight,
+                orientation_weight=orientation_weight,
+                max_position_step_m=max_position_step_m,
+                max_rotation_step_rad=max_rotation_step_rad,
+                bias_step=bias_step,
+                bias_weight=bias_weight,
+            )
+            return _postprocess_joint_step_host(
+                dq_step,
+                current_q=current_q,
+                previous_velocity_rad_s=previous_velocity_rad_s,
+                lower_limits_rad=lower_limits_rad,
+                upper_limits_rad=upper_limits_rad,
+                max_joint_step_rad=max_joint_step_rad,
+                max_joint_velocity_rad_s=max_joint_velocity_rad_s,
+                max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
+                dt_s=dt_s,
+            )
+
+        has_bias_step = self._upload_task_inputs(
+            spatial_jacobian,
+            position_error_xyz=position_error_xyz,
+            orientation_error_rotvec=orientation_error_rotvec,
+            bias_step=bias_step,
+        )
+        self._current_q_host[:] = np.asarray(current_q, dtype=np.float32)
+        if previous_velocity_rad_s is not None and len(previous_velocity_rad_s) == 7:
+            has_previous_velocity = 1
+            self._previous_velocity_host[:] = np.asarray(previous_velocity_rad_s, dtype=np.float32)
+        else:
+            has_previous_velocity = 0
+            self._previous_velocity_host.fill(0.0)
+        self._lower_limits_host[:] = np.asarray(lower_limits_rad, dtype=np.float32)
+        self._upper_limits_host[:] = np.asarray(upper_limits_rad, dtype=np.float32)
+        self._current_q_wp.assign(self._current_q_host)
+        self._previous_velocity_wp.assign(self._previous_velocity_host)
+        self._lower_limits_wp.assign(self._lower_limits_host)
+        self._upper_limits_wp.assign(self._upper_limits_host)
+
+        self._launch_dls_kernel(
+            has_bias_step=has_bias_step,
+            damping_lambda=damping_lambda,
+            position_weight=position_weight,
+            orientation_weight=orientation_weight,
+            max_position_step_m=max_position_step_m,
+            max_rotation_step_rad=max_rotation_step_rad,
+            bias_weight=bias_weight,
+            has_previous_velocity=has_previous_velocity,
+            max_joint_step_rad=max_joint_step_rad,
+            max_joint_velocity_rad_s=max_joint_velocity_rad_s,
+            max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
+            dt_s=dt_s,
+            write_joint_targets=1,
+        )
+        if int(self._status_wp.numpy()[0]) != 1:
+            dq_step = solve_full_pose_damped_least_squares_step(
+                spatial_jacobian,
+                position_error_xyz=position_error_xyz,
+                orientation_error_rotvec=orientation_error_rotvec,
+                damping_lambda=damping_lambda,
+                position_weight=position_weight,
+                orientation_weight=orientation_weight,
+                max_position_step_m=max_position_step_m,
+                max_rotation_step_rad=max_rotation_step_rad,
+                bias_step=bias_step,
+                bias_weight=bias_weight,
+            )
+            return _postprocess_joint_step_host(
+                dq_step,
+                current_q=current_q,
+                previous_velocity_rad_s=previous_velocity_rad_s,
+                lower_limits_rad=lower_limits_rad,
+                upper_limits_rad=upper_limits_rad,
+                max_joint_step_rad=max_joint_step_rad,
+                max_joint_velocity_rad_s=max_joint_velocity_rad_s,
+                max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
+                dt_s=dt_s,
+            )
+
+        self.last_wrote_joint_targets = True
+        flags = self._flags_wp.numpy()
+        return (
+            tuple(float(v) for v in self._q_cmd_out_wp.numpy()),
+            tuple(float(v) for v in self._dq_cmd_out_wp.numpy()),
+            tuple(float(v) for v in self._unclipped_q_cmd_out_wp.numpy()),
+            bool(int(flags[0])),
+            bool(int(flags[1])),
+        )
+
+
+def _postprocess_joint_step_host(
+    joint_step_rad: tuple[float, ...],
+    *,
+    current_q: tuple[float, ...],
+    previous_velocity_rad_s: tuple[float, ...] | None,
+    lower_limits_rad: tuple[float, ...],
+    upper_limits_rad: tuple[float, ...],
+    max_joint_step_rad: float,
+    max_joint_velocity_rad_s: float,
+    max_joint_acceleration_rad_s2: float,
+    dt_s: float,
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], bool, bool]:
+    safe_dt = max(1e-6, float(dt_s))
+    allowed_step = max(0.0, float(max_joint_step_rad))
+    safe_velocity = max(0.0, float(max_joint_velocity_rad_s))
+    if safe_velocity > 0.0 and safe_dt > 0.0:
+        velocity_step = safe_velocity * safe_dt
+        allowed_step = min(allowed_step, velocity_step) if allowed_step > 0.0 else velocity_step
+
+    step_values = [float(value) for value in joint_step_rad]
+    if allowed_step <= 0.0:
+        step_values = [0.0 for _ in step_values]
+    else:
+        step_values = [max(-allowed_step, min(allowed_step, value)) for value in step_values]
+
+    acceleration_limited = False
+    if (
+        previous_velocity_rad_s is not None
+        and len(previous_velocity_rad_s) == len(step_values)
+        and float(max_joint_acceleration_rad_s2) > 0.0
+    ):
+        max_delta_velocity = max(0.0, float(max_joint_acceleration_rad_s2)) * safe_dt
+        limited_steps: list[float] = []
+        for step, previous_velocity in zip(step_values, previous_velocity_rad_s, strict=True):
+            desired_velocity = float(step) / safe_dt
+            lower_velocity = float(previous_velocity) - max_delta_velocity
+            upper_velocity = float(previous_velocity) + max_delta_velocity
+            bounded_velocity = max(lower_velocity, min(upper_velocity, desired_velocity))
+            if abs(bounded_velocity - desired_velocity) > 1e-12:
+                acceleration_limited = True
+            limited_steps.append(bounded_velocity * safe_dt)
+        step_values = limited_steps
+
+    unclipped_q_cmd = tuple(float(current_q[index]) + step_values[index] for index in range(len(step_values)))
+    clipped = False
+    q_cmd_values: list[float] = []
+    for index, value in enumerate(unclipped_q_cmd):
+        bounded = max(float(lower_limits_rad[index]), min(float(upper_limits_rad[index]), float(value)))
+        if abs(bounded - float(value)) > 1e-12:
+            clipped = True
+        q_cmd_values.append(bounded)
+
+    q_cmd = tuple(q_cmd_values)
+    dq_cmd = tuple((q_cmd[index] - float(current_q[index])) / safe_dt for index in range(len(q_cmd)))
+    return q_cmd, dq_cmd, unclipped_q_cmd, acceleration_limited, clipped
 
 
 class NewtonRuntimeRobotInterface(RobotInterface):
@@ -314,6 +948,9 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._joint_qd_host: np.ndarray | None = None
         self._target_joint_q_host: np.ndarray | None = None
         self._target_joint_qd_host: np.ndarray | None = None
+        self._target_joint_q_wp: wp.array | None = None
+        self._target_joint_qd_wp: wp.array | None = None
+        self._target_joint_host_dirty = False
         self._arm_joint_q_indices: tuple[int, ...] = ()
         self._arm_joint_qd_indices: tuple[int, ...] = ()
         self._joint_q_index_by_label: dict[str, int] = {}
@@ -339,6 +976,7 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._gate_last_event = "direct_control"
         self._last_ik_result = None
         self._eef_body_suffix = ""
+        self._gpu_dls_solver: NewtonGpuFullPoseDlsStepSolver | None = None
         self._contact_stop_shape_finger_id_wp: wp.array | None = None
         self._contact_stop_joint_finger_id_wp: wp.array | None = None
         self._contact_stop_joint_closing_direction_wp: wp.array | None = None
@@ -354,6 +992,9 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._joint_qd_host = self.example.state_0.joint_qd.numpy().copy()
         self._target_joint_q_host = self._joint_q_host.copy()
         self._target_joint_qd_host = self._joint_qd_host.copy()
+        self._target_joint_q_wp = wp.array(self._target_joint_q_host, dtype=wp.float32, device=model.device)
+        self._target_joint_qd_wp = wp.array(self._target_joint_qd_host, dtype=wp.float32, device=model.device)
+        self._target_joint_host_dirty = False
         self._joint_q_index_by_label, self._joint_qd_index_by_label = _joint_scalar_index_maps(model)
         self._hand_closing_direction_by_joint = _l10_closing_direction_by_joint()
         self._hand_joint_limits_by_joint = _l10_joint_limits_by_joint()
@@ -369,11 +1010,20 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._eef_body_suffix = self.config.eef_body_suffix_by_side[self.config.arm_side]
         self._init_contact_stop_gpu_state()
         current_q = self._current_arm_q()
+        self._gpu_dls_solver = NewtonGpuFullPoseDlsStepSolver(device=model.device)
+        self._gpu_dls_solver.configure_target_writer(
+            arm_joint_q_indices=self._arm_joint_q_indices,
+            arm_joint_qd_indices=self._arm_joint_qd_indices,
+        target_joint_q=self._target_joint_q_wp,
+        target_joint_qd=self._target_joint_qd_wp,
+        )
+        ik_config_overrides = dict(self.config.ik_config_overrides)
+        ik_config_overrides.setdefault("dls_step_solver", self._gpu_dls_solver)
         ik_config = FullPoseDifferentialIkControllerConfig(
             seed_joint_positions_rad=current_q,
             neutral_joint_positions_rad=current_q,
             kinematics_model=self._kinematics,
-            **self.config.ik_config_overrides,
+            **ik_config_overrides,
         )
         self._ik = FullPoseDifferentialIkController(ik_config)
         self._ik.reset(self._robot_state(timestamp_s=0.0))
@@ -531,6 +1181,11 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._joint_qd_host = self.example.state_0.joint_qd.numpy().copy()
         self._target_joint_q_host = self._joint_q_host.copy()
         self._target_joint_qd_host = self._joint_qd_host.copy()
+        if self._target_joint_q_wp is not None:
+            self._target_joint_q_wp.assign(self._target_joint_q_host)
+        if self._target_joint_qd_wp is not None:
+            self._target_joint_qd_wp.assign(self._target_joint_qd_host)
+        self._target_joint_host_dirty = False
         self._last_ik_result = None
         self.command_count = 0
         if self._contact_stop_stopped_wp is not None:
@@ -881,6 +1536,9 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._ik.set_target(target)
         result = self._ik.step(self._robot_state(timestamp_s=command.timestamp_s), self.example.frame_dt)
         self._last_ik_result = result
+        arm_targets_written_on_gpu = bool(
+            self._gpu_dls_solver is not None and self._gpu_dls_solver.last_wrote_joint_targets
+        )
         assert self._joint_q_host is not None and self._joint_qd_host is not None
         assert self._target_joint_q_host is not None and self._target_joint_qd_host is not None
         for target_index, value in zip(self._arm_joint_q_indices, result.q_cmd, strict=True):
@@ -888,6 +1546,8 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         if result.dq_cmd is not None:
             for target_index, value in zip(self._arm_joint_qd_indices, result.dq_cmd, strict=True):
                 self._target_joint_qd_host[int(target_index)] = float(value)
+        if not arm_targets_written_on_gpu:
+            self._target_joint_host_dirty = True
         if self.config.publish_mode == "state" and self._kinematics is not None:
             self._kinematics.sync_joint_q(self._target_joint_q_host)
 
@@ -895,8 +1555,6 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         joint_values = _expand_l10_mimic_joint_values(hand_target)
         assert self._joint_q_host is not None and self._joint_qd_host is not None
         assert self._target_joint_q_host is not None and self._target_joint_qd_host is not None
-        if self.config.publish_mode == "drive_target":
-            self._sync_live_joint_state()
         max_step = max(0.0, float(self.config.hand_max_joint_step_rad))
         for joint_name, value in zip(joint_values.joint_names, joint_values.joint_positions, strict=True):
             label_suffix = _l10_joint_label_suffix(self.config.arm_side, str(joint_name))
@@ -908,6 +1566,7 @@ class NewtonRuntimeRobotInterface(RobotInterface):
             if max_step > 0.0:
                 target_value = float(np.clip(target_value, current_value - max_step, current_value + max_step))
             self._target_joint_q_host[int(q_index)] = target_value
+            self._target_joint_host_dirty = True
             qd_index = self._joint_qd_index_by_label.get(label_suffix)
             if qd_index is not None:
                 if self.config.hand_publish_kinematic_velocity:
@@ -915,12 +1574,23 @@ class NewtonRuntimeRobotInterface(RobotInterface):
                 else:
                     hand_qd = 0.0
                 self._target_joint_qd_host[int(qd_index)] = hand_qd
+                self._target_joint_host_dirty = True
 
     def _publish_joint_state(self) -> None:
         assert self._target_joint_q_host is not None and self._target_joint_qd_host is not None
         model = self.example.model
-        joint_q = wp.array(self._target_joint_q_host, dtype=wp.float32, device=model.device)
-        joint_qd = wp.array(self._target_joint_qd_host, dtype=wp.float32, device=model.device)
+        if self._target_joint_q_wp is None:
+            self._target_joint_q_wp = wp.array(self._target_joint_q_host, dtype=wp.float32, device=model.device)
+            self._target_joint_host_dirty = False
+        if self._target_joint_qd_wp is None:
+            self._target_joint_qd_wp = wp.array(self._target_joint_qd_host, dtype=wp.float32, device=model.device)
+            self._target_joint_host_dirty = False
+        if self._target_joint_host_dirty:
+            self._target_joint_q_wp.assign(self._target_joint_q_host)
+            self._target_joint_qd_wp.assign(self._target_joint_qd_host)
+            self._target_joint_host_dirty = False
+        joint_q = self._target_joint_q_wp
+        joint_qd = self._target_joint_qd_wp
         self._apply_contact_stop_gpu(joint_q, joint_qd)
 
         if self.config.publish_mode == "drive_target":

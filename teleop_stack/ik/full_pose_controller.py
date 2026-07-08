@@ -33,6 +33,50 @@ class FullPoseKinematicsModel(Protocol):
         raise NotImplementedError
 
 
+class FullPoseDlsStepSolver(Protocol):
+    def solve_full_pose_step(
+        self,
+        spatial_jacobian: SpatialJacobian,
+        *,
+        position_error_xyz: tuple[float, float, float],
+        orientation_error_rotvec: tuple[float, float, float],
+        damping_lambda: float,
+        position_weight: float,
+        orientation_weight: float,
+        max_position_step_m: float | None,
+        max_rotation_step_rad: float | None,
+        bias_step: tuple[float, ...] | None,
+        bias_weight: float,
+    ) -> tuple[float, ...]:
+        raise NotImplementedError
+
+
+class FullPoseJointStepSolver(FullPoseDlsStepSolver, Protocol):
+    def solve_full_pose_joint_step(
+        self,
+        spatial_jacobian: SpatialJacobian,
+        *,
+        position_error_xyz: tuple[float, float, float],
+        orientation_error_rotvec: tuple[float, float, float],
+        damping_lambda: float,
+        position_weight: float,
+        orientation_weight: float,
+        max_position_step_m: float | None,
+        max_rotation_step_rad: float | None,
+        bias_step: tuple[float, ...] | None,
+        bias_weight: float,
+        current_q: tuple[float, ...],
+        previous_velocity_rad_s: tuple[float, ...] | None,
+        lower_limits_rad: tuple[float, ...],
+        upper_limits_rad: tuple[float, ...],
+        max_joint_step_rad: float,
+        max_joint_velocity_rad_s: float,
+        max_joint_acceleration_rad_s2: float,
+        dt_s: float,
+    ) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], bool, bool]:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
 class FullPoseDifferentialIkControllerConfig:
     seed_joint_positions_rad: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -64,6 +108,7 @@ class FullPoseDifferentialIkControllerConfig:
     orientation_alignment_gate_enabled: bool = False
     orientation_alignment_tolerance_rad: float = math.radians(5.0)
     orientation_alignment_timeout_s: float = 0.0
+    dls_step_solver: FullPoseDlsStepSolver | None = None
 
 
 class FullPoseDifferentialIkController:
@@ -286,39 +331,85 @@ class FullPoseDifferentialIkController:
             max_position_step_m=self.config.max_task_step_m,
             max_rotation_step_rad=self.config.max_rotation_step_rad,
         )
-        dq_step = solve_full_pose_damped_least_squares_step(
-            spatial_jacobian,
-            position_error_xyz=position_error,
-            orientation_error_rotvec=orientation_error,
-            damping_lambda=float(self.config.damping_lambda) * damping_scale,
-            position_weight=self.config.position_weight,
-            orientation_weight=self.config.orientation_weight,
-            max_position_step_m=self.config.max_task_step_m,
-            max_rotation_step_rad=self.config.max_rotation_step_rad,
-            bias_step=bias_step,
-            bias_weight=self.config.bias_weight,
+        dls_solver = self.config.dls_step_solver
+        joint_step_solver = (
+            dls_solver
+            if dls_solver is not None and hasattr(dls_solver, "solve_full_pose_joint_step")
+            else None
         )
-        dq_step = clamp_joint_step(
-            dq_step,
-            max_step_rad=self.config.max_joint_step_rad,
-            max_velocity_rad_s=self.config.max_joint_velocity_rad_s,
-            dt_s=dt_s,
-        )
-        dq_step, acceleration_limited = _clamp_joint_acceleration(
-            dq_step,
-            previous_velocity_rad_s=self._last_joint_velocity_rad_s,
-            max_acceleration_rad_s2=float(self.config.max_joint_acceleration_rad_s2),
-            dt_s=dt_s,
-        )
-        if acceleration_limited:
-            events.append("joint_acceleration_limited")
+        if joint_step_solver is not None:
+            q_cmd, dq_cmd, unclipped_q_cmd, acceleration_limited, clipped = joint_step_solver.solve_full_pose_joint_step(
+                spatial_jacobian,
+                position_error_xyz=position_error,
+                orientation_error_rotvec=orientation_error,
+                damping_lambda=float(self.config.damping_lambda) * damping_scale,
+                position_weight=self.config.position_weight,
+                orientation_weight=self.config.orientation_weight,
+                max_position_step_m=self.config.max_task_step_m,
+                max_rotation_step_rad=self.config.max_rotation_step_rad,
+                bias_step=bias_step,
+                bias_weight=self.config.bias_weight,
+                current_q=current_q,
+                previous_velocity_rad_s=self._last_joint_velocity_rad_s,
+                lower_limits_rad=self.config.joint_lower_limits_rad,
+                upper_limits_rad=self.config.joint_upper_limits_rad,
+                max_joint_step_rad=self.config.max_joint_step_rad,
+                max_joint_velocity_rad_s=self.config.max_joint_velocity_rad_s,
+                max_joint_acceleration_rad_s2=self.config.max_joint_acceleration_rad_s2,
+                dt_s=dt_s,
+            )
+            if acceleration_limited:
+                events.append("joint_acceleration_limited")
+        else:
+            dq_step = solve_full_pose_damped_least_squares_step(
+                spatial_jacobian,
+                position_error_xyz=position_error,
+                orientation_error_rotvec=orientation_error,
+                damping_lambda=float(self.config.damping_lambda) * damping_scale,
+                position_weight=self.config.position_weight,
+                orientation_weight=self.config.orientation_weight,
+                max_position_step_m=self.config.max_task_step_m,
+                max_rotation_step_rad=self.config.max_rotation_step_rad,
+                bias_step=bias_step,
+                bias_weight=self.config.bias_weight,
+            )
+            if dls_solver is not None:
+                dq_step = dls_solver.solve_full_pose_step(
+                    spatial_jacobian,
+                    position_error_xyz=position_error,
+                    orientation_error_rotvec=orientation_error,
+                    damping_lambda=float(self.config.damping_lambda) * damping_scale,
+                    position_weight=self.config.position_weight,
+                    orientation_weight=self.config.orientation_weight,
+                    max_position_step_m=self.config.max_task_step_m,
+                    max_rotation_step_rad=self.config.max_rotation_step_rad,
+                    bias_step=bias_step,
+                    bias_weight=self.config.bias_weight,
+                )
+            dq_step = clamp_joint_step(
+                dq_step,
+                max_step_rad=self.config.max_joint_step_rad,
+                max_velocity_rad_s=self.config.max_joint_velocity_rad_s,
+                dt_s=dt_s,
+            )
+            dq_step, acceleration_limited = _clamp_joint_acceleration(
+                dq_step,
+                previous_velocity_rad_s=self._last_joint_velocity_rad_s,
+                max_acceleration_rad_s2=float(self.config.max_joint_acceleration_rad_s2),
+                dt_s=dt_s,
+            )
+            if acceleration_limited:
+                events.append("joint_acceleration_limited")
 
-        unclipped_q_cmd = tuple(current_q[index] + dq_step[index] for index in range(len(current_q)))
-        q_cmd, clipped = clip_joint_positions(
-            unclipped_q_cmd,
-            lower_limits_rad=self.config.joint_lower_limits_rad,
-            upper_limits_rad=self.config.joint_upper_limits_rad,
-        )
+            unclipped_q_cmd = tuple(current_q[index] + dq_step[index] for index in range(len(current_q)))
+            q_cmd, clipped = clip_joint_positions(
+                unclipped_q_cmd,
+                lower_limits_rad=self.config.joint_lower_limits_rad,
+                upper_limits_rad=self.config.joint_upper_limits_rad,
+            )
+            applied_dq = tuple(q_cmd[index] - current_q[index] for index in range(len(current_q)))
+            safe_dt = max(1e-6, float(dt_s))
+            dq_cmd = tuple(value / safe_dt for value in applied_dq)
         if clipped:
             events.append("joint_limit_clamped")
             events.extend(
@@ -332,7 +423,6 @@ class FullPoseDifferentialIkController:
 
         applied_dq = tuple(q_cmd[index] - current_q[index] for index in range(len(current_q)))
         safe_dt = max(1e-6, float(dt_s))
-        dq_cmd = tuple(value / safe_dt for value in applied_dq)
         self._last_joint_velocity_rad_s = dq_cmd
         applied_dq_norm = math.sqrt(sum(value * value for value in applied_dq))
         achieved_task_delta = tuple(
