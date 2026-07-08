@@ -686,6 +686,20 @@ if [[ "${WITH_SCENE}" -eq 1 ]]; then
     if [[ -n "${NEWTON_TELEOP_LOOP_HZ:-}" ]]; then
         scene_perf_args+=(--teleop-loop-hz "${NEWTON_TELEOP_LOOP_HZ}")
     fi
+    scene_contact_args=(
+        --drive-hand-target-ke "${NEWTON_DRIVE_HAND_TARGET_KE:-80}"
+        --drive-hand-target-kd "${NEWTON_DRIVE_HAND_TARGET_KD:-15}"
+        --drive-hand-effort-limit "${NEWTON_DRIVE_HAND_EFFORT_LIMIT:-0.8}"
+        --l10-bottle-contact-stop-activation "${NEWTON_L10_BOTTLE_CONTACT_STOP_ACTIVATION:-0.0015}"
+        --l10-bottle-contact-stop-penetration "${NEWTON_L10_BOTTLE_CONTACT_STOP_PENETRATION:-0.00035}"
+        --l10-bottle-contact-stop-release "${NEWTON_L10_BOTTLE_CONTACT_STOP_RELEASE:-0.00015}"
+        --l10-bottle-contact-stop-retreat-rad "${NEWTON_L10_BOTTLE_CONTACT_STOP_RETREAT_RAD:-0.0015}"
+    )
+    if [[ "${NEWTON_TELEOP_HAND_PUBLISH_KINEMATIC_VELOCITY:-0}" == "1" ]]; then
+        scene_contact_args+=(--teleop-hand-publish-kinematic-velocity)
+    else
+        scene_contact_args+=(--no-teleop-hand-publish-kinematic-velocity)
+    fi
     log "starting Newton scene in foreground; press Ctrl+C here to stop the whole stack"
     scene_pythonpath="${PYTHONPATH:-}"
     if [[ -n "${SCENE_PYTHONPATH_DIR}" ]]; then
@@ -704,6 +718,7 @@ if [[ "${WITH_SCENE}" -eq 1 ]]; then
         --no-viewer-hydro-contact-surface \
         "${scene_mode_args[@]}" \
         "${scene_perf_args[@]}" \
+        "${scene_contact_args[@]}" \
         "${SCENE_ARGS[@]}"
 elif [[ "${START_VR_OUTPUT}" -eq 1 && "${VR_OUTPUT_MODE}" == "legacy-v4l2" ]]; then
     log "starting VR output in foreground; press Ctrl+C here to stop the whole stack"

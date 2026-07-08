@@ -85,6 +85,7 @@ L10_CONTACT_KD = 1.5e3
 L10_CONTACT_KF = 2.5e2
 L10_CONTACT_MARGIN_M = -1.0e-3
 L10_CONTACT_GAP_M = 3.0e-3
+L10_BOTTLE_CONTACT_STOP_ACTIVATION_M = 1.5e-3
 L10_BOTTLE_CONTACT_STOP_PENETRATION_M = 2.0e-3
 L10_BOTTLE_CONTACT_STOP_RELEASE_M = 8.0e-4
 L10_BOTTLE_CONTACT_STOP_RETREAT_RAD = 1.0e-2
@@ -1494,9 +1495,11 @@ class Example:
         self.teleop_mode = "ready"
         self.teleop_last_event = "session_created"
         self.teleop_exit_requested = False
+        self._skip_next_step_after_reset = False
         self._teleop_session_entered = False
         self._bottle_table_guard: BottleTableGuard | None = None
         self.l10_bottle_contact_stop_enabled = bool(args.l10_bottle_contact_stop)
+        self.l10_bottle_contact_stop_activation_m = max(0.0, float(args.l10_bottle_contact_stop_activation))
         self.l10_bottle_contact_stop_threshold_m = max(0.0, float(args.l10_bottle_contact_stop_penetration))
         self.l10_bottle_contact_stop_release_m = max(0.0, float(args.l10_bottle_contact_stop_release))
         self._l10_bottle_contact_stop_fingers: set[str] = set()
@@ -1861,42 +1864,66 @@ class Example:
     def _capture_initial_state_snapshot(self) -> None:
         self._initial_joint_q = self.model.joint_q.numpy().copy()
         self._initial_joint_qd = self.model.joint_qd.numpy().copy()
+        self._initial_joint_target_q = self.model.joint_target_q.numpy().copy()
+        self._initial_joint_target_qd = self.model.joint_target_qd.numpy().copy()
+        self._initial_model_body_q = self.model.body_q.numpy().copy()
+        self._initial_model_body_qd = self.model.body_qd.numpy().copy()
         self._initial_body_q = self.state_0.body_q.numpy().copy()
         self._initial_body_qd = self.state_0.body_qd.numpy().copy()
 
     def reset_scene_to_initial(self) -> None:
         if not all(
             hasattr(self, name)
-            for name in ("_initial_joint_q", "_initial_joint_qd", "_initial_body_q", "_initial_body_qd")
+            for name in (
+                "_initial_joint_q",
+                "_initial_joint_qd",
+                "_initial_joint_target_q",
+                "_initial_joint_target_qd",
+                "_initial_model_body_q",
+                "_initial_model_body_qd",
+                "_initial_body_q",
+                "_initial_body_qd",
+            )
         ):
             return
 
         joint_q = wp.array(self._initial_joint_q.copy(), dtype=wp.float32, device=self.model.device)
         joint_qd = wp.array(self._initial_joint_qd.copy(), dtype=wp.float32, device=self.model.device)
+        joint_target_q = wp.array(self._initial_joint_target_q.copy(), dtype=wp.float32, device=self.model.device)
+        joint_target_qd = wp.array(self._initial_joint_target_qd.copy(), dtype=wp.float32, device=self.model.device)
+        model_body_q = wp.array(self._initial_model_body_q.copy(), dtype=wp.transform, device=self.model.device)
+        model_body_qd = wp.array(
+            self._initial_model_body_qd.copy(), dtype=wp.spatial_vector, device=self.model.device
+        )
         body_q = wp.array(self._initial_body_q.copy(), dtype=wp.transform, device=self.model.device)
         body_qd = wp.array(self._initial_body_qd.copy(), dtype=wp.spatial_vector, device=self.model.device)
 
-        self.model.joint_q = joint_q
-        self.model.joint_qd = joint_qd
-        self.state_0.joint_q = joint_q
-        self.state_0.joint_qd = joint_qd
-        self.state_0.body_q = body_q
-        self.state_0.body_qd = body_qd
-        self.state_1.joint_q = wp.clone(joint_q)
-        self.state_1.joint_qd = wp.clone(joint_qd)
-        self.state_1.body_q = wp.clone(body_q)
-        self.state_1.body_qd = wp.clone(body_qd)
+        wp.copy(self.model.joint_q, joint_q)
+        wp.copy(self.model.joint_qd, joint_qd)
+        wp.copy(self.model.joint_target_q, joint_target_q)
+        wp.copy(self.model.joint_target_qd, joint_target_qd)
+        wp.copy(self.model.body_q, model_body_q)
+        wp.copy(self.model.body_qd, model_body_qd)
+        wp.copy(self.state_0.joint_q, joint_q)
+        wp.copy(self.state_0.joint_qd, joint_qd)
+        wp.copy(self.state_0.body_q, body_q)
+        wp.copy(self.state_0.body_qd, body_qd)
         self.state_0.clear_forces()
+        if self.solver is not None and hasattr(self.solver, "reset"):
+            self.solver.reset(self.state_0)
+        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+        self.state_1.assign(self.state_0)
         self.state_1.clear_forces()
 
-        self.control.clear()
-        self.control.joint_target_q = wp.clone(joint_q)
-        self.control.joint_target_qd = wp.clone(joint_qd)
+        self.control.clear(self.model)
+        wp.copy(self.control.joint_target_q, joint_target_q)
+        wp.copy(self.control.joint_target_qd, joint_target_qd)
         self.contacts = self.collision_pipeline.contacts() if self.collision_pipeline is not None else self.model.contacts()
         self.model.bvh_refit_shapes(self.state_0)
         if self.model.particle_count:
             self.model.bvh_refit_particles(self.state_0)
         self.sim_time = 0.0
+        self._skip_next_step_after_reset = True
         self._l10_bottle_contact_stop_fingers.clear()
         self._l10_bottle_contact_max_penetration_by_finger.clear()
 
@@ -1912,6 +1939,7 @@ class Example:
             print(
                 "L10-bottle contact stop:"
                 f" enabled={self.l10_bottle_contact_stop_enabled}"
+                f" activation={self.l10_bottle_contact_stop_activation_m:g}m"
                 f" threshold={self.l10_bottle_contact_stop_threshold_m:g}m"
                 f" release={self.l10_bottle_contact_stop_release_m:g}m",
                 flush=True,
@@ -1938,6 +1966,7 @@ class Example:
         print(
             "L10-bottle contact stop:"
             f" enabled={self.l10_bottle_contact_stop_enabled}"
+            f" activation={self.l10_bottle_contact_stop_activation_m:g}m"
             f" threshold={self.l10_bottle_contact_stop_threshold_m:g}m"
             f" release={self.l10_bottle_contact_stop_release_m:g}m",
             flush=True,
@@ -2025,11 +2054,14 @@ class Example:
             )
             normal_l10_to_bottle = normal_shape0_to_shape1 if shape0_is_l10 else -normal_shape0_to_shape1
             penetration_m = max(0.0, -separation_m)
+            stop_metric_m = penetration_m
+            if separation_m <= self.l10_bottle_contact_stop_activation_m:
+                stop_metric_m = max(stop_metric_m, self.l10_bottle_contact_stop_threshold_m)
             finger_family = _l10_finger_family_from_body_label(l10_link_label)
             if finger_family is not None:
                 max_penetration_by_finger[finger_family] = max(
                     max_penetration_by_finger.get(finger_family, 0.0),
-                    penetration_m,
+                    stop_metric_m,
                 )
 
             if should_write_log:
@@ -2052,6 +2084,7 @@ class Example:
                         "normal_l10_to_bottle": _json_vec3(normal_l10_to_bottle),
                         "separation_m": separation_m,
                         "penetration_m": penetration_m,
+                        "contact_stop_metric_m": stop_metric_m,
                         "margin0_m": float(margin0[contact_index]),
                         "margin1_m": float(margin1[contact_index]),
                     }
@@ -2156,6 +2189,9 @@ class Example:
                 self.teleop_exit_requested = True
 
         self._publish_teleop_xr_status()
+        if self._skip_next_step_after_reset:
+            self._skip_next_step_after_reset = False
+            return
 
         if self.teleop_exit_requested and hasattr(self.viewer, "close"):
             self.viewer.close()
@@ -3045,6 +3081,12 @@ class Example:
             action=argparse.BooleanOptionalAction,
             default=True,
             help="Stop L10 finger closing targets when that finger penetrates the dynamic bottle.",
+        )
+        parser.add_argument(
+            "--l10-bottle-contact-stop-activation",
+            type=float,
+            default=L10_BOTTLE_CONTACT_STOP_ACTIVATION_M,
+            help="L10-bottle separation [m] below which further finger closing is blocked before penetration grows.",
         )
         parser.add_argument(
             "--l10-bottle-contact-stop-penetration",
