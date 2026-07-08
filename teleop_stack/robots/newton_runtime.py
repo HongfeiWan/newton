@@ -51,6 +51,133 @@ if TYPE_CHECKING:
     from debug.import_dual_nero_linker_l10 import Example
 
 
+_FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
+_FINGER_COUNT = len(_FINGER_NAMES)
+
+
+@wp.kernel(enable_backward=False)
+def _l10_bottle_contact_stop_update_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    rigid_contact_shape0: wp.array[wp.int32],
+    rigid_contact_shape1: wp.array[wp.int32],
+    rigid_contact_point0: wp.array[wp.vec3],
+    rigid_contact_point1: wp.array[wp.vec3],
+    rigid_contact_normal: wp.array[wp.vec3],
+    rigid_contact_margin0: wp.array[wp.float32],
+    rigid_contact_margin1: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    shape_body: wp.array[wp.int32],
+    shape_finger_id: wp.array[wp.int32],
+    bottle_shape_index: int,
+    rigid_contact_max: int,
+    activation_m: float,
+    threshold_m: float,
+    release_m: float,
+    stopped: wp.array[wp.int32],
+    max_metric: wp.array[wp.float32],
+):
+    finger_id = wp.tid()
+    raw_count = rigid_contact_count[0]
+    active_count = int(raw_count)
+    if active_count > rigid_contact_max:
+        active_count = rigid_contact_max
+
+    finger_metric = float(0.0)
+    contact_index = int(0)
+    while contact_index < active_count:
+        shape0 = rigid_contact_shape0[contact_index]
+        shape1 = rigid_contact_shape1[contact_index]
+        shape0_finger_id = int(-1)
+        shape1_finger_id = int(-1)
+        if shape0 >= 0:
+            shape0_finger_id = shape_finger_id[shape0]
+        if shape1 >= 0:
+            shape1_finger_id = shape_finger_id[shape1]
+        shape0_matches = shape0_finger_id == finger_id and shape1 == bottle_shape_index
+        shape1_matches = shape1_finger_id == finger_id and shape0 == bottle_shape_index
+
+        if shape0_matches or shape1_matches:
+            body0 = shape_body[shape0]
+            body1 = shape_body[shape1]
+            support0_world = wp.transform_point(body_q[body0], rigid_contact_point0[contact_index])
+            support1_world = wp.transform_point(body_q[body1], rigid_contact_point1[contact_index])
+            normal_shape0_to_shape1 = rigid_contact_normal[contact_index]
+            normal_norm = wp.length(normal_shape0_to_shape1)
+            if normal_norm > 0.0:
+                normal_shape0_to_shape1 = normal_shape0_to_shape1 / normal_norm
+            separation_m = (
+                wp.dot(normal_shape0_to_shape1, support1_world - support0_world)
+                - (rigid_contact_margin0[contact_index] + rigid_contact_margin1[contact_index])
+            )
+            penetration_m = wp.max(float(0.0), -separation_m)
+            stop_metric_m = penetration_m
+            if separation_m <= activation_m:
+                stop_metric_m = wp.max(stop_metric_m, threshold_m)
+            finger_metric = wp.max(finger_metric, stop_metric_m)
+
+        contact_index = contact_index + 1
+
+    max_metric[finger_id] = finger_metric
+    if finger_metric >= threshold_m:
+        stopped[finger_id] = 1
+    elif finger_metric <= release_m:
+        stopped[finger_id] = 0
+
+
+@wp.kernel(enable_backward=False)
+def _l10_bottle_contact_stop_clamp_targets_kernel(
+    current_joint_q: wp.array[wp.float32],
+    target_joint_q: wp.array[wp.float32],
+    target_joint_qd: wp.array[wp.float32],
+    joint_finger_id: wp.array[wp.int32],
+    joint_closing_direction: wp.array[wp.float32],
+    joint_limit_lower: wp.array[wp.float32],
+    joint_limit_upper: wp.array[wp.float32],
+    joint_coord_to_dof: wp.array[wp.int32],
+    stopped: wp.array[wp.int32],
+    stop_retreat_rad: float,
+    release_retreat_rad: float,
+    frame_dt: float,
+    publish_kinematic_velocity: int,
+):
+    q_index = wp.tid()
+    finger_id = joint_finger_id[q_index]
+    if finger_id < 0:
+        return
+    if stopped[finger_id] == 0:
+        return
+
+    closing_direction = joint_closing_direction[q_index]
+    if wp.abs(closing_direction) <= 0.0:
+        return
+
+    current_value = current_joint_q[q_index]
+    target_value = target_joint_q[q_index]
+    closing_delta = (target_value - current_value) * closing_direction
+
+    if closing_delta < 0.0:
+        retreat = release_retreat_rad
+        if retreat <= 0.0:
+            return
+        signed_target = target_value * closing_direction
+        signed_release = (current_value - closing_direction * retreat) * closing_direction
+        target_value = wp.min(signed_target, signed_release) * closing_direction
+    elif closing_delta > 0.0:
+        target_value = current_value - closing_direction * stop_retreat_rad
+    else:
+        return
+
+    target_value = wp.clamp(target_value, joint_limit_lower[q_index], joint_limit_upper[q_index])
+    target_joint_q[q_index] = target_value
+
+    qd_index = joint_coord_to_dof[q_index]
+    if qd_index >= 0:
+        if publish_kinematic_velocity != 0:
+            target_joint_qd[qd_index] = (target_value - current_value) / frame_dt
+        else:
+            target_joint_qd[qd_index] = 0.0
+
+
 @dataclass(frozen=True)
 class NewtonRuntimeRobotConfig:
     arm_side: ArmSide = "right"
@@ -212,6 +339,14 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._gate_last_event = "direct_control"
         self._last_ik_result = None
         self._eef_body_suffix = ""
+        self._contact_stop_shape_finger_id_wp: wp.array | None = None
+        self._contact_stop_joint_finger_id_wp: wp.array | None = None
+        self._contact_stop_joint_closing_direction_wp: wp.array | None = None
+        self._contact_stop_joint_limit_lower_wp: wp.array | None = None
+        self._contact_stop_joint_limit_upper_wp: wp.array | None = None
+        self._contact_stop_joint_coord_to_dof_wp: wp.array | None = None
+        self._contact_stop_stopped_wp: wp.array | None = None
+        self._contact_stop_max_metric_wp: wp.array | None = None
 
     def connect(self) -> None:
         model = self.example.model
@@ -232,6 +367,7 @@ class NewtonRuntimeRobotInterface(RobotInterface):
             finite_difference_rad=self.config.finite_difference_rad,
         )
         self._eef_body_suffix = self.config.eef_body_suffix_by_side[self.config.arm_side]
+        self._init_contact_stop_gpu_state()
         current_q = self._current_arm_q()
         ik_config = FullPoseDifferentialIkControllerConfig(
             seed_joint_positions_rad=current_q,
@@ -256,6 +392,56 @@ class NewtonRuntimeRobotInterface(RobotInterface):
             f" openxr_adapter={self.config.mapping.openxr_coordinate_adapter}"
             f" eef={self._eef_body_suffix}"
         )
+
+    def _init_contact_stop_gpu_state(self) -> None:
+        model = self.example.model
+        device = model.device
+
+        shape_body_host = model.shape_body.numpy().copy()
+        shape_finger_id = np.full(int(model.shape_count), -1, dtype=np.int32)
+        for shape_index, body_index in enumerate(shape_body_host):
+            body_id = int(body_index)
+            if 0 <= body_id < len(model.body_label):
+                finger_id = _l10_finger_id_from_body_label(model.body_label[body_id])
+                if finger_id is not None:
+                    shape_finger_id[int(shape_index)] = int(finger_id)
+
+        joint_finger_id = np.full(int(model.joint_coord_count), -1, dtype=np.int32)
+        joint_closing_direction = np.zeros(int(model.joint_coord_count), dtype=np.float32)
+        joint_limit_lower = np.full(int(model.joint_coord_count), -np.inf, dtype=np.float32)
+        joint_limit_upper = np.full(int(model.joint_coord_count), np.inf, dtype=np.float32)
+        joint_coord_to_dof = np.full(int(model.joint_coord_count), -1, dtype=np.int32)
+
+        for label_suffix, q_index in self._joint_q_index_by_label.items():
+            base_name = _l10_base_joint_name(label_suffix)
+            finger_id = _l10_finger_id_from_joint_name(base_name)
+            closing_direction = float(self._hand_closing_direction_by_joint.get(base_name, 0.0))
+            if finger_id is None or abs(closing_direction) <= 0.0:
+                continue
+
+            coord_index = int(q_index)
+            joint_finger_id[coord_index] = int(finger_id)
+            joint_closing_direction[coord_index] = closing_direction
+            limits = self._hand_joint_limits_by_joint.get(base_name)
+            if limits is not None:
+                joint_limit_lower[coord_index] = float(limits[0])
+                joint_limit_upper[coord_index] = float(limits[1])
+            qd_index = self._joint_qd_index_by_label.get(label_suffix)
+            if qd_index is not None:
+                joint_coord_to_dof[coord_index] = int(qd_index)
+
+        self._contact_stop_shape_finger_id_wp = wp.array(shape_finger_id, dtype=wp.int32, device=device)
+        self._contact_stop_joint_finger_id_wp = wp.array(joint_finger_id, dtype=wp.int32, device=device)
+        self._contact_stop_joint_closing_direction_wp = wp.array(
+            joint_closing_direction,
+            dtype=wp.float32,
+            device=device,
+        )
+        self._contact_stop_joint_limit_lower_wp = wp.array(joint_limit_lower, dtype=wp.float32, device=device)
+        self._contact_stop_joint_limit_upper_wp = wp.array(joint_limit_upper, dtype=wp.float32, device=device)
+        self._contact_stop_joint_coord_to_dof_wp = wp.array(joint_coord_to_dof, dtype=wp.int32, device=device)
+        self._contact_stop_stopped_wp = wp.zeros(_FINGER_COUNT, dtype=wp.int32, device=device)
+        self._contact_stop_max_metric_wp = wp.zeros(_FINGER_COUNT, dtype=wp.float32, device=device)
 
     def send_command(self, command: SingleArmTeleopCommand) -> None:
         if not self._connected:
@@ -347,6 +533,10 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         self._target_joint_qd_host = self._joint_qd_host.copy()
         self._last_ik_result = None
         self.command_count = 0
+        if self._contact_stop_stopped_wp is not None:
+            self._contact_stop_stopped_wp.zero_()
+        if self._contact_stop_max_metric_wp is not None:
+            self._contact_stop_max_metric_wp.zero_()
         if self._kinematics is not None:
             self._kinematics.sync_joint_q(self._joint_q_host)
         self.reset_relative_anchor()
@@ -717,11 +907,6 @@ class NewtonRuntimeRobotInterface(RobotInterface):
             target_value = float(value)
             if max_step > 0.0:
                 target_value = float(np.clip(target_value, current_value - max_step, current_value + max_step))
-            target_value = self._clamp_hand_target_for_bottle_contact(
-                str(joint_name),
-                current_value=current_value,
-                target_value=target_value,
-            )
             self._target_joint_q_host[int(q_index)] = target_value
             qd_index = self._joint_qd_index_by_label.get(label_suffix)
             if qd_index is not None:
@@ -731,59 +916,12 @@ class NewtonRuntimeRobotInterface(RobotInterface):
                     hand_qd = 0.0
                 self._target_joint_qd_host[int(qd_index)] = hand_qd
 
-    def _clamp_hand_target_for_bottle_contact(
-        self,
-        joint_name: str,
-        *,
-        current_value: float,
-        target_value: float,
-    ) -> float:
-        if not self.config.hand_contact_stop_enabled:
-            return target_value
-        finger = _l10_finger_family_from_joint_name(joint_name)
-        if finger is None:
-            return target_value
-
-        blocked_fingers_fn = getattr(self.example, "l10_bottle_contact_stop_fingers", None)
-        if not callable(blocked_fingers_fn):
-            return target_value
-        blocked_fingers = blocked_fingers_fn()
-        if finger not in blocked_fingers:
-            return target_value
-
-        base_joint_name = _l10_base_joint_name(joint_name)
-        closing_direction = self._hand_closing_direction_by_joint.get(base_joint_name, 0.0)
-        if abs(closing_direction) <= 0.0:
-            return target_value
-
-        closing_delta = (float(target_value) - float(current_value)) * closing_direction
-        if closing_delta < 0.0:
-            release_retreat = max(0.0, float(self.config.hand_contact_release_retreat_rad))
-            if release_retreat <= 0.0:
-                return target_value
-            target_value = min(
-                float(target_value) * closing_direction,
-                (float(current_value) - closing_direction * release_retreat) * closing_direction,
-            ) * closing_direction
-            limits = self._hand_joint_limits_by_joint.get(base_joint_name)
-            if limits is not None:
-                target_value = float(np.clip(target_value, limits[0], limits[1]))
-            return target_value
-        if closing_delta == 0.0:
-            return target_value
-
-        retreat = max(0.0, float(self.config.hand_contact_stop_retreat_rad))
-        clamped_target = float(current_value) - closing_direction * retreat
-        limits = self._hand_joint_limits_by_joint.get(base_joint_name)
-        if limits is not None:
-            clamped_target = float(np.clip(clamped_target, limits[0], limits[1]))
-        return clamped_target
-
     def _publish_joint_state(self) -> None:
         assert self._target_joint_q_host is not None and self._target_joint_qd_host is not None
         model = self.example.model
         joint_q = wp.array(self._target_joint_q_host, dtype=wp.float32, device=model.device)
         joint_qd = wp.array(self._target_joint_qd_host, dtype=wp.float32, device=model.device)
+        self._apply_contact_stop_gpu(joint_q, joint_qd)
 
         if self.config.publish_mode == "drive_target":
             self.example.control.joint_target_q = joint_q
@@ -810,6 +948,80 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         model.bvh_refit_shapes(self.example.state_0)
         self._joint_q_host = self._target_joint_q_host.copy()
         self._joint_qd_host = self._target_joint_qd_host.copy()
+
+    def _apply_contact_stop_gpu(self, target_joint_q: wp.array, target_joint_qd: wp.array) -> None:
+        if not self.config.hand_contact_stop_enabled:
+            return
+        if (
+            self._contact_stop_shape_finger_id_wp is None
+            or self._contact_stop_joint_finger_id_wp is None
+            or self._contact_stop_joint_closing_direction_wp is None
+            or self._contact_stop_joint_limit_lower_wp is None
+            or self._contact_stop_joint_limit_upper_wp is None
+            or self._contact_stop_joint_coord_to_dof_wp is None
+            or self._contact_stop_stopped_wp is None
+            or self._contact_stop_max_metric_wp is None
+        ):
+            return
+
+        contacts = getattr(self.example, "contacts", None)
+        state = getattr(self.example, "state_0", None)
+        if contacts is None or state is None or getattr(state, "body_q", None) is None:
+            return
+
+        bottle_shape_index = int(getattr(self.example, "_dynamic_bottle_collision_shape", -1))
+        if bottle_shape_index < 0:
+            return
+
+        release_m = min(
+            float(getattr(self.example, "l10_bottle_contact_stop_release_m", 0.0)),
+            float(getattr(self.example, "l10_bottle_contact_stop_threshold_m", 0.0)),
+        )
+        wp.launch(
+            kernel=_l10_bottle_contact_stop_update_kernel,
+            dim=_FINGER_COUNT,
+            inputs=[
+                contacts.rigid_contact_count,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_point0,
+                contacts.rigid_contact_point1,
+                contacts.rigid_contact_normal,
+                contacts.rigid_contact_margin0,
+                contacts.rigid_contact_margin1,
+                state.body_q,
+                self.example.model.shape_body,
+                self._contact_stop_shape_finger_id_wp,
+                bottle_shape_index,
+                int(contacts.rigid_contact_max),
+                float(getattr(self.example, "l10_bottle_contact_stop_activation_m", 0.0)),
+                float(getattr(self.example, "l10_bottle_contact_stop_threshold_m", 0.0)),
+                release_m,
+                self._contact_stop_stopped_wp,
+                self._contact_stop_max_metric_wp,
+            ],
+            device=self.example.model.device,
+        )
+        wp.launch(
+            kernel=_l10_bottle_contact_stop_clamp_targets_kernel,
+            dim=int(self.example.model.joint_coord_count),
+            inputs=[
+                self.example.state_0.joint_q,
+                target_joint_q,
+                target_joint_qd,
+                self._contact_stop_joint_finger_id_wp,
+                self._contact_stop_joint_closing_direction_wp,
+                self._contact_stop_joint_limit_lower_wp,
+                self._contact_stop_joint_limit_upper_wp,
+                self._contact_stop_joint_coord_to_dof_wp,
+                self._contact_stop_stopped_wp,
+                float(self.config.hand_contact_stop_retreat_rad),
+                float(self.config.hand_contact_release_retreat_rad),
+                float(self.example.frame_dt),
+                1 if self.config.hand_publish_kinematic_velocity else 0,
+            ],
+            device=self.example.model.device,
+        )
 
     def _sync_live_joint_state(self) -> None:
         joint_q = self.example.state_0.joint_q.numpy().copy()
@@ -923,6 +1135,26 @@ def _l10_finger_family_from_joint_name(joint_name: str) -> str | None:
     for family in ("thumb", "index", "middle", "ring", "pinky"):
         if base_name.startswith(f"{family}_"):
             return family
+    return None
+
+
+def _l10_finger_id_from_joint_name(joint_name: str) -> int | None:
+    family = _l10_finger_family_from_joint_name(joint_name)
+    if family is None:
+        return None
+    return _FINGER_NAMES.index(family)
+
+
+def _l10_finger_id_from_body_label(body_label: str) -> int | None:
+    link_name = str(body_label).rsplit("/", maxsplit=1)[-1].lower()
+    for side in ("right", "left"):
+        prefix = f"{side}_l10_"
+        if link_name.startswith(prefix):
+            link_name = link_name[len(prefix) :]
+            break
+    for index, family in enumerate(_FINGER_NAMES):
+        if link_name.startswith(f"{family}_"):
+            return index
     return None
 
 

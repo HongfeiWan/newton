@@ -1502,8 +1502,6 @@ class Example:
         self.l10_bottle_contact_stop_activation_m = max(0.0, float(args.l10_bottle_contact_stop_activation))
         self.l10_bottle_contact_stop_threshold_m = max(0.0, float(args.l10_bottle_contact_stop_penetration))
         self.l10_bottle_contact_stop_release_m = max(0.0, float(args.l10_bottle_contact_stop_release))
-        self._l10_bottle_contact_stop_fingers: set[str] = set()
-        self._l10_bottle_contact_max_penetration_by_finger: dict[str, float] = {}
 
         urdf_path = _resolve_urdf(args.urdf)
         builder = newton.ModelBuilder(up_axis=URDF_UP_AXIS, gravity=args.gravity)
@@ -1924,8 +1922,6 @@ class Example:
             self.model.bvh_refit_particles(self.state_0)
         self.sim_time = 0.0
         self._skip_next_step_after_reset = True
-        self._l10_bottle_contact_stop_fingers.clear()
-        self._l10_bottle_contact_max_penetration_by_finger.clear()
 
         if self.teleop_robot is not None and hasattr(self.teleop_robot, "reset_to_scene_state"):
             self.teleop_robot.reset_to_scene_state()
@@ -2000,12 +1996,11 @@ class Example:
             log_file is not None
             and self._l10_bottle_contact_frame % self._l10_bottle_contact_log_stride == 0
         )
-        if not self.l10_bottle_contact_stop_enabled and not should_write_log:
+        if not should_write_log:
             self._l10_bottle_contact_frame += 1
             return
 
         if self.contacts is None or self.state_0.body_q is None:
-            self._update_l10_bottle_contact_stop({})
             self._l10_bottle_contact_frame += 1
             return
 
@@ -2023,7 +2018,6 @@ class Example:
         margin1 = self.contacts.rigid_contact_margin1.numpy()[:active_contact_count]
 
         records = []
-        max_penetration_by_finger: dict[str, float] = {}
         for contact_index in range(active_contact_count):
             shape_index0 = int(shape0[contact_index])
             shape_index1 = int(shape1[contact_index])
@@ -2054,15 +2048,6 @@ class Example:
             )
             normal_l10_to_bottle = normal_shape0_to_shape1 if shape0_is_l10 else -normal_shape0_to_shape1
             penetration_m = max(0.0, -separation_m)
-            stop_metric_m = penetration_m
-            if separation_m <= self.l10_bottle_contact_stop_activation_m:
-                stop_metric_m = max(stop_metric_m, self.l10_bottle_contact_stop_threshold_m)
-            finger_family = _l10_finger_family_from_body_label(l10_link_label)
-            if finger_family is not None:
-                max_penetration_by_finger[finger_family] = max(
-                    max_penetration_by_finger.get(finger_family, 0.0),
-                    stop_metric_m,
-                )
 
             if should_write_log:
                 surface0_world = _transform_point_from_body_q(body_q, body0, point0[contact_index] + offset0[contact_index])
@@ -2084,13 +2069,11 @@ class Example:
                         "normal_l10_to_bottle": _json_vec3(normal_l10_to_bottle),
                         "separation_m": separation_m,
                         "penetration_m": penetration_m,
-                        "contact_stop_metric_m": stop_metric_m,
                         "margin0_m": float(margin0[contact_index]),
                         "margin1_m": float(margin1[contact_index]),
                     }
                 )
 
-        self._update_l10_bottle_contact_stop(max_penetration_by_finger)
         if should_write_log:
             log_file.write(
                 json.dumps(
@@ -2108,25 +2091,6 @@ class Example:
             )
             log_file.flush()
         self._l10_bottle_contact_frame += 1
-
-    def _update_l10_bottle_contact_stop(self, max_penetration_by_finger: dict[str, float]) -> None:
-        self._l10_bottle_contact_max_penetration_by_finger = dict(max_penetration_by_finger)
-        if not self.l10_bottle_contact_stop_enabled:
-            self._l10_bottle_contact_stop_fingers.clear()
-            return
-
-        release_m = min(self.l10_bottle_contact_stop_release_m, self.l10_bottle_contact_stop_threshold_m)
-        stopped = set(self._l10_bottle_contact_stop_fingers)
-        for finger in ("thumb", "index", "middle", "ring", "pinky"):
-            penetration_m = float(max_penetration_by_finger.get(finger, 0.0))
-            if penetration_m >= self.l10_bottle_contact_stop_threshold_m:
-                stopped.add(finger)
-            elif penetration_m <= release_m:
-                stopped.discard(finger)
-        self._l10_bottle_contact_stop_fingers = stopped
-
-    def l10_bottle_contact_stop_fingers(self) -> set[str]:
-        return set(self._l10_bottle_contact_stop_fingers)
 
     def _enforce_bottle_above_scene_collision(self, state) -> None:
         guard = self._bottle_table_guard
