@@ -58,6 +58,13 @@ NEWTON_VIEWER_CAMERA_YAW=135 \
 NEWTON_VR_GPU=0 DISPLAY=:0 docker/run_vr_stack.sh --vr-output-mode direct-gpu
 ```
 
+direct-gpu 还会默认使用静态 CloudXR Web Client server，避免 webpack dev server 常驻占用 CPU。
+如果需要回到旧的 webpack dev server：
+
+```bash
+DISPLAY=:0 docker/run_vr_stack.sh --vr-output-mode direct-gpu --web-mode image
+```
+
 direct-gpu 启动后不应再看到这些进程：
 
 ```bash

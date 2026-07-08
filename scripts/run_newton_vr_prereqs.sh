@@ -13,6 +13,7 @@ XR_ENV_PATH="${XR_ENV_PATH:-${HOME}/.cloudxr/run/cloudxr.env}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 SCENE_PYTHON_BIN="${SCENE_PYTHON_BIN:-${PYTHON_BIN}}"
 TELEOP_PYTHON_BIN="${TELEOP_PYTHON_BIN:-${PYTHON_BIN}}"
+WEB_MODE_WAS_SET="${WEB_MODE+x}"
 WEB_MODE="${WEB_MODE:-image}"
 START_CLOUDXR=1
 START_WEB=1
@@ -90,7 +91,7 @@ while [[ $# -gt 0 ]]; do
         --python) PYTHON_BIN="$2"; SCENE_PYTHON_BIN="$2"; TELEOP_PYTHON_BIN="$2"; shift 2 ;;
         --scene-python) SCENE_PYTHON_BIN="$2"; shift 2 ;;
         --teleop-python) TELEOP_PYTHON_BIN="$2"; shift 2 ;;
-        --web-mode) WEB_MODE="$2"; shift 2 ;;
+        --web-mode) WEB_MODE="$2"; WEB_MODE_WAS_SET=1; shift 2 ;;
         --skip-cloudxr) START_CLOUDXR=0; shift ;;
         --skip-web) START_WEB=0; shift ;;
         --skip-voice) START_VOICE=0; shift ;;
@@ -133,6 +134,9 @@ case "${VR_OUTPUT_MODE}" in
     off) START_VR_OUTPUT=0 ;;
     *) err "--vr-output-mode must be direct-gpu, legacy-v4l2, or off"; exit 2 ;;
 esac
+if [[ "${VR_OUTPUT_MODE}" == "direct-gpu" && -z "${WEB_MODE_WAS_SET}" && "${WEB_MODE}" == "image" ]]; then
+    WEB_MODE="image-static"
+fi
 
 cd "${REPO_ROOT}"
 mkdir -p "${LOG_DIR}"

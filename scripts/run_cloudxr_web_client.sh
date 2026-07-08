@@ -12,7 +12,7 @@ IMPORTED_WEBXR_DIR="${IMPORTED_WEBXR_DIR:-${HOME}/.cache/teleop_stack/cloudxr_we
 
 usage() {
     cat <<'EOF'
-Usage: scripts/run_cloudxr_web_client.sh [--check-only] [--mode image|local|docker] [--skip-build]
+Usage: scripts/run_cloudxr_web_client.sh [--check-only] [--mode image|image-static|local|docker] [--skip-build]
 
 Starts the full CloudXR Web Client on https://<host-ip>:8443/.
 Port 48322 is only the CloudXR certificate/WSS proxy endpoint.
@@ -41,8 +41,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "${MODE}" != "image" && "${MODE}" != "local" && "${MODE}" != "docker" ]]; then
-    err "--mode must be image, local, or docker"
+if [[ "${MODE}" != "image" && "${MODE}" != "image-static" && "${MODE}" != "local" && "${MODE}" != "docker" ]]; then
+    err "--mode must be image, image-static, local, or docker"
     exit 2
 fi
 
@@ -58,7 +58,7 @@ if [[ ! -f "${CLOUDXR_DIR}/docker-compose.yaml" ]]; then
     exit 1
 fi
 
-if [[ "${MODE}" == "image" || "${MODE}" == "docker" ]]; then
+if [[ "${MODE}" == "image" || "${MODE}" == "image-static" || "${MODE}" == "docker" ]]; then
     if ! command -v docker >/dev/null 2>&1; then
         err "docker is not available"
         exit 1
@@ -117,7 +117,7 @@ ok "CloudXR web overlay applied"
 
 CXR_WEB_SDK_VERSION="${CXR_WEB_SDK_VERSION:-6.2.0}"
 SDK_TGZ="${CLOUDXR_DIR}/nvidia-cloudxr-${CXR_WEB_SDK_VERSION}.tgz"
-if [[ "${MODE}" != "image" && ! -f "${SDK_TGZ}" ]]; then
+if [[ "${MODE}" != "image" && "${MODE}" != "image-static" && ! -f "${SDK_TGZ}" ]]; then
     warn "missing CloudXR Web SDK: ${SDK_TGZ}"
     if [[ "${CHECK_ONLY}" -eq 0 ]]; then
         log "downloading/preparing CloudXR Web SDK with IsaacTeleop helper..."
@@ -125,12 +125,12 @@ if [[ "${MODE}" != "image" && ! -f "${SDK_TGZ}" ]]; then
     fi
 fi
 
-if [[ "${MODE}" != "image" && ! -f "${SDK_TGZ}" ]]; then
+if [[ "${MODE}" != "image" && "${MODE}" != "image-static" && ! -f "${SDK_TGZ}" ]]; then
     err "CloudXR Web SDK is still missing: ${SDK_TGZ}"
     err "Put nvidia-cloudxr-${CXR_WEB_SDK_VERSION}.tgz in ${CLOUDXR_DIR}, then rerun this script."
     exit 1
 fi
-if [[ "${MODE}" != "image" ]]; then
+if [[ "${MODE}" != "image" && "${MODE}" != "image-static" ]]; then
     ok "CloudXR Web SDK=${SDK_TGZ}"
 fi
 
@@ -146,7 +146,7 @@ fi
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 
-if [[ "${MODE}" == "image" ]]; then
+if [[ "${MODE}" == "image" || "${MODE}" == "image-static" ]]; then
     CONTAINER_NAME="${CLOUDXR_WEB_CONTAINER_NAME:-cloudxr-web-app-newton}"
     IMAGE_CERT_DIR="${IMPORTED_WEBXR_DIR}/.newton_certs"
     IMAGE_CERT_FILE="${IMAGE_CERT_DIR}/web_client.crt"
@@ -190,9 +190,106 @@ module.exports = merge(dev, {
   },
 });
 EOF
+    if [[ "${MODE}" == "image-static" ]]; then
+        IMAGE_STATIC_SERVER="${IMPORTED_WEBXR_DIR}/newton_static_server.js"
+        cat > "${IMAGE_STATIC_SERVER}" <<'EOF'
+const fs = require('fs');
+const https = require('https');
+const net = require('net');
+const path = require('path');
+
+const root = '/app/webxr_client/build';
+const certDir = '/app/webxr_client/.newton_certs';
+const mime = {
+  '.css': 'text/css',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.js': 'application/javascript',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.wasm': 'application/wasm',
+};
+
+function sendFile(res, filePath) {
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, {'content-type': mime[path.extname(filePath)] || 'application/octet-stream'});
+    res.end(data);
+  });
+}
+
+const server = https.createServer({
+  key: fs.readFileSync(path.join(certDir, 'web_client.key')),
+  cert: fs.readFileSync(path.join(certDir, 'web_client.crt')),
+}, (req, res) => {
+  const rawPath = decodeURIComponent((req.url || '/').split('?')[0]);
+  let filePath = path.normalize(path.join(root, rawPath === '/' ? 'index.html' : rawPath));
+  if (!filePath.startsWith(root)) {
+    res.writeHead(403);
+    res.end('forbidden');
+    return;
+  }
+  fs.stat(filePath, (err, stat) => {
+    if (!err && stat.isDirectory()) {
+      filePath = path.join(filePath, 'index.html');
+    }
+    if (!err && stat.isFile()) {
+      sendFile(res, filePath);
+      return;
+    }
+    sendFile(res, path.join(root, 'index.html'));
+  });
+});
+
+server.on('upgrade', (req, socket, head) => {
+  if (!req.url || !req.url.startsWith('/quest-voice')) {
+    socket.destroy();
+    return;
+  }
+  const upstream = net.connect(8766, '127.0.0.1', () => {
+    upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`);
+    for (const [key, value] of Object.entries(req.headers)) {
+      upstream.write(`${key}: ${value}\r\n`);
+    }
+    upstream.write('\r\n');
+    if (head.length) {
+      upstream.write(head);
+    }
+    upstream.pipe(socket);
+    socket.pipe(upstream);
+  });
+  upstream.on('error', () => socket.destroy());
+});
+
+server.listen(8443, '0.0.0.0', () => {
+  console.log('[cloudxr-web-static] serving https://0.0.0.0:8443/');
+});
+EOF
+    fi
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
     ok "open this in Quest: https://${HOST_IP}:8443/"
     log "48322 is only for certificate/WSS. If needed, accept: https://${HOST_IP}:48322/"
+    if [[ "${MODE}" == "image-static" ]]; then
+        log "starting imported CloudXR Web Client image in static mode; press Ctrl+C to stop"
+        rebuild_cmd=""
+        if [[ "${NEWTON_WEB_STATIC_REBUILD:-1}" != "0" || ! -f "${IMPORTED_WEBXR_DIR}/build/index.html" ]]; then
+            rebuild_cmd="npx webpack --config webpack.newton.local.js >/tmp/newton_static_webpack.log 2>&1 && "
+        fi
+        exec docker run --rm \
+            --name "${CONTAINER_NAME}" \
+            --network host \
+            --user "$(id -u):$(id -g)" \
+            -v "${IMPORTED_WEBXR_DIR}:/app/webxr_client" \
+            --entrypoint sh \
+            "${IMPORTED_IMAGE}" \
+            -lc "cd /app/webxr_client && ${rebuild_cmd}exec node newton_static_server.js"
+    fi
     log "starting imported CloudXR Web Client image; press Ctrl+C to stop"
     exec docker run --rm \
         --name "${CONTAINER_NAME}" \
