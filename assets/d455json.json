@@ -1,0 +1,202 @@
+{
+  "name": "Intel RealSense D455",
+  "model": "D455",
+  "body": {
+    "role": "ego_fixed",
+    "constant_name": "EGO_CAMERA_BODY_SIZE",
+    "body_size_m_xyz": [0.026, 0.124, 0.029],
+    "body_size_mm": [26.0, 124.0, 29.0],
+    "dimensions_m": {
+      "width": 0.124,
+      "height": 0.029,
+      "depth": 0.026
+    }
+  },
+  "sensors": {
+    "depth": {
+      "sensor": "stereo",
+      "shutter": "global",
+      "baseline_m": 0.095,
+      "fov": {
+        "horizontal": 87.0,
+        "vertical": 58.0
+      },
+      "ideal_range_m": [0.6, 6.0],
+      "profiles_usb3": [
+        {
+          "format": "Z16",
+          "resolution": [1280, 720],
+          "fps": [5, 15, 30]
+        },
+        {
+          "format": "Z16",
+          "resolution": [848, 480],
+          "fps": [5, 15, 30, 60, 90]
+        },
+        {
+          "format": "Z16",
+          "resolution": [640, 480],
+          "fps": [5, 15, 30, 60, 90]
+        }
+      ],
+      "nominal_intrinsics": {
+        "1280x720": {
+          "fx": 674.4193,
+          "fy": 649.4572,
+          "cx": 639.5,
+          "cy": 359.5,
+          "horizontal_fov": 87.0,
+          "vertical_fov": 58.0
+        },
+        "848x480": {
+          "fx": 446.8028,
+          "fy": 432.9715,
+          "cx": 423.5,
+          "cy": 239.5,
+          "horizontal_fov": 87.0,
+          "vertical_fov": 58.0
+        },
+        "640x480": {
+          "fx": 417.0321,
+          "fy": 399.4271,
+          "cx": 319.5,
+          "cy": 239.5,
+          "horizontal_fov": 75.0,
+          "vertical_fov": 62.0
+        }
+      }
+    },
+    "rgb": {
+      "sensor": "OV9782",
+      "shutter": "global",
+      "fov": {
+        "horizontal": 90.0,
+        "vertical": 65.0,
+        "diagonal": 98.0
+      },
+      "profiles_usb3": [
+        {
+          "format": "YUY2",
+          "resolution": [1280, 800],
+          "fps": [5, 15, 30]
+        },
+        {
+          "format": "YUY2",
+          "resolution": [848, 480],
+          "fps": [5, 15, 30, 60]
+        },
+        {
+          "format": "YUY2",
+          "resolution": [640, 480],
+          "fps": [5, 15, 30, 60]
+        },
+        {
+          "format": "YUY2",
+          "resolution": [640, 360],
+          "fps": [5, 15, 30, 60, 90]
+        },
+        {
+          "format": "YUY2",
+          "resolution": [480, 270],
+          "fps": [5, 15, 30, 60, 90]
+        },
+        {
+          "format": "YUY2",
+          "resolution": [424, 240],
+          "fps": [5, 15, 30, 60, 90]
+        }
+      ],
+      "nominal_intrinsics": {
+        "1280x800": {
+          "fx": 640.0,
+          "fy": 627.8742,
+          "cx": 639.5,
+          "cy": 399.5,
+          "horizontal_fov": 90.0,
+          "vertical_fov": 65.0
+        }
+      }
+    },
+    "imu": {
+      "dof": 6,
+      "accelerometer_range_g": [-4.0, 4.0],
+      "gyroscope_range_deg_s": [-1000.0, 1000.0],
+      "variants": {
+        "BMI055": {
+          "accelerometer_sample_rate_hz": [62.5, 250],
+          "gyroscope_sample_rate_hz": [200, 400],
+          "timestamp_accuracy_us": 50
+        },
+        "BMI085": {
+          "accelerometer_sample_rate_hz": [100, 200],
+          "gyroscope_sample_rate_hz": [200, 400],
+          "timestamp_accuracy_us": 50
+        }
+      }
+    }
+  },
+  "physical": {
+    "body_size_m_xyz": [0.026, 0.124, 0.029],
+    "dimensions_m": {
+      "width": 0.124,
+      "height": 0.029,
+      "depth": 0.026
+    },
+    "weight_kg": 0.116,
+    "depth_start_point_from_front_glass_m": -0.00455,
+    "depth_origin_from_tripod_centerline_to_left_imager_m": 0.0475
+  },
+  "genesis_presets": {
+    "depth_hd_1280x720_30fps": {
+      "res": [1280, 720],
+      "fov": 58.0,
+      "near": 0.52,
+      "far": 6.0,
+      "fps": 30
+    },
+    "depth_wide_848x480_90fps": {
+      "res": [848, 480],
+      "fov": 58.0,
+      "near": 0.35,
+      "far": 6.0,
+      "fps": 90
+    },
+    "depth_vga_640x480_90fps": {
+      "res": [640, 480],
+      "fov": 62.0,
+      "near": 0.32,
+      "far": 6.0,
+      "fps": 90
+    },
+    "rgb_native_1280x800_30fps": {
+      "res": [1280, 800],
+      "fov": 65.0,
+      "near": 0.05,
+      "far": 100.0,
+      "fps": 30
+    }
+  },
+  "calibration_notes": [
+    "The intrinsics in this file are nominal values derived from official FOV and resolution: fx = width / (2 * tan(horizontal_fov / 2)), fy = height / (2 * tan(vertical_fov / 2)).",
+    "For metric reconstruction or real/sim alignment, replace nominal_intrinsics with per-device calibration read from librealsense, because RealSense cameras are factory calibrated and lens FOV can vary.",
+    "Genesis Camera fov is vertical FOV in degrees. Use 58 for the D455 depth HD/16:9 preset, 62 for the VGA/4:3 depth preset, and 65 for the native RGB preset.",
+    "Genesis uses a pinhole camera model here; lens distortion is not modeled in this preset."
+  ],
+  "sources": [
+    {
+      "name": "RealSense D455 product page",
+      "url": "https://www.realsenseai.com/products/real-sense-depth-camera-d455f/",
+      "used_for": ["87x58 FOV", "0.6m to 6m ideal range", "95mm baseline", "global shutter"]
+    },
+    {
+      "name": "RealSense D400 Series Datasheet, Revision 020, August 2025",
+      "url": "https://www.realsenseai.com/download/21345/",
+      "used_for": ["stream profiles", "FOV table", "min-z table", "mechanical dimensions", "IMU specifications"]
+    },
+    {
+      "name": "Genesis Camera API",
+      "url": "https://genesis-world.readthedocs.io/en/latest/api_reference/sensor/camera.html",
+      "used_for": ["res", "fov", "near", "far", "GUI", "render depth/RGB"]
+    }
+  ]
+}

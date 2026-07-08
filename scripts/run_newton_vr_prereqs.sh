@@ -370,9 +370,13 @@ PY
 stop_stale_cloudxr_runtimes() {
     local socket_path="$1"
     local runtime_user="${USER:-$(id -un)}"
+    local pgrep_user="${runtime_user}"
     local pids=()
     local pid
-    mapfile -t pids < <(pgrep -u "${runtime_user}" -f 'python.*-m isaacteleop.cloudxr' || true)
+    if ! id -u "${pgrep_user}" >/dev/null 2>&1; then
+        pgrep_user="$(id -u)"
+    fi
+    mapfile -t pids < <(pgrep -u "${pgrep_user}" -f 'python.*-m isaacteleop.cloudxr' || true)
     if [[ "${#pids[@]}" -eq 0 ]]; then
         return
     fi

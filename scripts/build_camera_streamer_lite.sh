@@ -139,9 +139,11 @@ mkdir -p "$HOST_BUILD_DIR"
 docker rm "$BUILD_CONTAINER" >/dev/null 2>&1 || true
 
 echo "[camera-lite] compiling C++ operators"
-docker run --gpus all --runtime=nvidia --name "$BUILD_CONTAINER" \
+docker run --gpus all --name "$BUILD_CONTAINER" \
     --network=host \
     --user "$(id -u):$(id -g)" \
+    -e "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}" \
+    -e "NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-graphics,video,compute,utility,display}" \
     -v "$HOST_BUILD_DIR:/camera_streamer/build" \
     "$BASE_TAG" \
     bash -lc "

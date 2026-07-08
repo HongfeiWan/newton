@@ -16,12 +16,21 @@ sudo modprobe v4l2loopback video_nr=44 card_label=teleop_sim_screen exclusive_ca
 ls -l /dev/video44
 ```
 
+非docker启动，需要在newton conda环境中启动
+
+scripts/run_newton_vr_prereqs_object.sh --display :0
+
+
 ## 2. Docker 一条命令启动
 
 ```bash
 cd ~/project/newton
+newgrp docker
 DISPLAY=:0 docker/run_vr_stack.sh
 ```
+
+不要默认用 `sudo` 启动这条命令；如果确实用 `sudo DISPLAY=:0 docker/run_vr_stack.sh`，
+脚本也会自动挂载原用户 home 下的 `.cache` 和 `.cloudxr`。
 
 启动成功后终端应看到：
 

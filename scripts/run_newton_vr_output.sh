@@ -24,6 +24,7 @@ if [[ -z "$CAMERA_STREAMER_LITE_IMAGE" ]]; then
         CAMERA_STREAMER_LITE_IMAGE="newton-camera-streamer-lite:latest"
     fi
 fi
+CAMERA_STREAMER_CONTAINER_NAME="${NEWTON_CAMERA_STREAMER_CONTAINER_NAME:-newton-camera-streamer-lite}"
 XR_HAND_LOG_PATH="${TELEOP_XR_HAND_LOG_PATH:-$REPO_ROOT/logs/xr_debug/camera_overlay_hand.jsonl}"
 XR_HAND_LOG_STRIDE="${TELEOP_XR_HAND_LOG_STRIDE:-10}"
 XR_STATUS_PATH="${TELEOP_XR_STATUS_PATH:-}"
@@ -127,6 +128,40 @@ require_command() {
         status_ok "$1=$(command -v "$1")"
     else
         status_error "missing command: $1"
+    fi
+}
+
+detect_display_size() {
+    local probe_output
+    local detected_size
+    probe_output="$(
+        ffmpeg -hide_banner -loglevel info \
+            -f x11grab \
+            -i "${CAPTURE_DISPLAY}+${CAPTURE_OFFSET}" \
+            -frames:v 1 \
+            -f null - 2>&1 || true
+    )"
+    detected_size="$(printf '%s\n' "$probe_output" | sed -nE 's/.*Video:.* ([0-9]+x[0-9]+)[, ].*/\1/p' | head -n 1)"
+    if [[ -n "$detected_size" ]]; then
+        printf '%s\n' "$detected_size"
+    fi
+}
+
+fit_capture_size_to_display() {
+    local detected_size="$1"
+    local capture_w="${CAPTURE_SIZE%x*}"
+    local capture_h="${CAPTURE_SIZE#*x}"
+    local display_w="${detected_size%x*}"
+    local display_h="${detected_size#*x}"
+
+    if [[ ! "$capture_w" =~ ^[0-9]+$ || ! "$capture_h" =~ ^[0-9]+$ ]]; then
+        return
+    fi
+    if (( capture_w > display_w || capture_h > display_h )); then
+        status_warn "capture size ${CAPTURE_SIZE} exceeds display ${detected_size}; using ${detected_size}"
+        CAPTURE_SIZE="$detected_size"
+    else
+        status_ok "display size=${detected_size}"
     fi
 }
 
@@ -261,6 +296,12 @@ if [[ "$failures" -ne 0 ]]; then
     exit 1
 fi
 
+if detected_display_size="$(detect_display_size)"; [[ -n "$detected_display_size" ]]; then
+    fit_capture_size_to_display "$detected_display_size"
+else
+    status_warn "could not auto-detect display size; keeping capture size ${CAPTURE_SIZE}"
+fi
+
 if [[ "$USE_LITE_CAMERA_STREAMER" == "false" && "$SKIP_PATCH" != "true" ]]; then
     patch_args=(--camera-streamer-root "$CAMERA_STREAMER_ROOT")
     if [[ -n "$DOCKERFILE_SYNTAX_IMAGE" ]]; then
@@ -286,6 +327,9 @@ cleanup() {
         status_warn "stopping ffmpeg pid=$FFMPEG_PID"
         kill "$FFMPEG_PID" >/dev/null 2>&1 || true
         wait "$FFMPEG_PID" >/dev/null 2>&1 || true
+    fi
+    if command -v docker >/dev/null 2>&1; then
+        docker rm -f "$CAMERA_STREAMER_CONTAINER_NAME" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT INT TERM
@@ -326,6 +370,15 @@ if [[ "$USE_LITE_CAMERA_STREAMER" == "true" ]]; then
     fi
 
     config_basename="$(basename "$CONFIG_PATH")"
+    docker rm -f "$CAMERA_STREAMER_CONTAINER_NAME" >/dev/null 2>&1 || true
+    if [[ "${NEWTON_STOP_STALE_CAMERA_STREAMERS:-1}" == "1" ]]; then
+        mapfile -t stale_camera_streamers < <(docker ps -q --filter "ancestor=${CAMERA_STREAMER_LITE_IMAGE}")
+        if [[ "${#stale_camera_streamers[@]}" -gt 0 ]]; then
+            status_warn "stopping stale camera_streamer container(s): ${stale_camera_streamers[*]}"
+            docker rm -f "${stale_camera_streamers[@]}" >/dev/null 2>&1 || true
+        fi
+    fi
+
     cxr_host_volume_path="${CXR_HOST_VOLUME_PATH:-$HOME/.cloudxr}"
     xr_runtime_json="${XR_RUNTIME_JSON:-${cxr_host_volume_path}/openxr_cloudxr.json}"
     nv_cxr_runtime_dir="${NV_CXR_RUNTIME_DIR:-${cxr_host_volume_path}/run}"
@@ -333,10 +386,15 @@ if [[ "$USE_LITE_CAMERA_STREAMER" == "true" ]]; then
     xr_status_dir="$(dirname "$XR_STATUS_PATH")"
     mkdir -p "$hand_log_dir"
     mkdir -p "$xr_status_dir"
+    if [[ "${NEWTON_CLEAR_XR_HAND_LOG:-1}" == "1" ]]; then
+        : > "$XR_HAND_LOG_PATH"
+        chmod 0666 "$XR_HAND_LOG_PATH" >/dev/null 2>&1 || true
+        status_ok "cleared XR hand log=$XR_HAND_LOG_PATH"
+    fi
     docker_args=(
         --rm
+        --name "$CAMERA_STREAMER_CONTAINER_NAME"
         --gpus all
-        --runtime=nvidia
         --privileged
         --network=host
         --ulimit stack=33554432
@@ -347,13 +405,21 @@ if [[ "$USE_LITE_CAMERA_STREAMER" == "true" ]]; then
         -e "TELEOP_XR_STATUS_PATH=${XR_STATUS_PATH}"
         -e "TELEOP_CAMERA_XR_RECOVERY_MAX_RETRIES=${XR_RECOVERY_MAX_RETRIES}"
         -e "TELEOP_CAMERA_XR_RECOVERY_DELAY_S=${XR_RECOVERY_DELAY_S}"
+        -e "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}"
         -e "NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-graphics,video,compute,utility,display}"
+        -e "VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/etc/vulkan/icd.d/nvidia_icd.json}"
         -v /dev:/dev
         -v /run/udev:/run/udev:rw
         -v "${cxr_host_volume_path}:${cxr_host_volume_path}:ro"
         -v "${CONFIG_PATH}:/config/${config_basename}:ro"
         -v "${hand_log_dir}:${hand_log_dir}:rw"
     )
+    if [[ -f /etc/vulkan/icd.d/nvidia_icd.json ]]; then
+        docker_args+=(-v /etc/vulkan/icd.d/nvidia_icd.json:/etc/vulkan/icd.d/nvidia_icd.json:ro)
+    fi
+    if [[ -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json ]]; then
+        docker_args+=(-v /usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/10_nvidia.json:ro)
+    fi
     if [[ "${xr_status_dir}" != "${cxr_host_volume_path}" && "${xr_status_dir}" != "${cxr_host_volume_path}/"* ]]; then
         docker_args+=(-v "${xr_status_dir}:${xr_status_dir}:ro")
     fi

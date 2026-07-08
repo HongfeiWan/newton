@@ -25,6 +25,7 @@ RUN printf 'deb %s %s main universe\n' "${UBUNTU_MIRROR}" "${UBUNTU_SUITE}" > /e
     ffmpeg \
     git \
     iproute2 \
+    libatomic1 \
     libegl1 \
     libgl1 \
     libglib2.0-0 \
