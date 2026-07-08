@@ -2386,6 +2386,7 @@ class Example:
             transition_duration=float(args.direct_gpu_plane_transition_duration),
             verbose=bool(args.direct_gpu_xr_verbose),
             capture_fps=float(args.direct_gpu_capture_fps),
+            flip_x=bool(args.direct_gpu_flip_x),
         )
         bridge = NewtonXrBridge(config)
         try:
@@ -3271,6 +3272,12 @@ class Example:
             type=float,
             default=float(os.environ.get("NEWTON_DIRECT_GPU_CAPTURE_FPS", "20")),
             help="Maximum viewer capture rate for direct-gpu XR output [Hz]. Set <=0 to capture every render frame.",
+        )
+        parser.add_argument(
+            "--direct-gpu-flip-x",
+            action=argparse.BooleanOptionalAction,
+            default=os.environ.get("NEWTON_DIRECT_GPU_FLIP_X", "0").lower() in ("1", "true", "yes", "on"),
+            help="Horizontally flip the direct-gpu viewer frame before sending it to the XR plane.",
         )
         parser.add_argument(
             "--direct-gpu-plane-distance",

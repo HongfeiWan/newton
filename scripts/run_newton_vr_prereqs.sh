@@ -657,6 +657,11 @@ if [[ "${WITH_SCENE}" -eq 1 ]]; then
             --no-d455-opencv-window
             --no-d405-opencv-window
         )
+        if [[ "${NEWTON_DIRECT_GPU_FLIP_X:-1}" == "0" ]]; then
+            scene_mode_args+=(--no-direct-gpu-flip-x)
+        else
+            scene_mode_args+=(--direct-gpu-flip-x)
+        fi
         if [[ "${NEWTON_DIRECT_GPU_HEADLESS:-1}" == "0" ]]; then
             scene_mode_args+=(--no-headless)
             warn "direct-gpu visible viewer requested; NVIDIA EGL/CUDA interop may fall back to the slower X11 path"

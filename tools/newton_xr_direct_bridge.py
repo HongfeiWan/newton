@@ -13,6 +13,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import warp as wp
+
+
+@wp.kernel
+def _copy_rgb_flip_x(input_img: wp.array3d[wp.uint8], output_img: wp.array3d[wp.uint8], width: int):
+    x, y = wp.tid()
+    source_x = width - x - 1
+    output_img[y, x, 0] = input_img[y, source_x, 0]
+    output_img[y, x, 1] = input_img[y, source_x, 1]
+    output_img[y, x, 2] = input_img[y, source_x, 2]
+
 
 class NewtonXrBridgeUnavailable(RuntimeError):
     """Raised when the direct GPU/XR runtime is not available."""
@@ -38,6 +49,7 @@ class NewtonXrBridgeConfig:
     verbose: bool = False
     scheduler_threads: int = 3
     capture_fps: float = 20.0
+    flip_x: bool = False
 
 
 class _LatestFrameStore:
@@ -130,6 +142,7 @@ class NewtonXrBridge:
         self._target_image: Any | None = None
         self._app: Any | None = None
         self._thread: threading.Thread | None = None
+        self._flipped_image: Any | None = None
         self._started = False
         self._captured_frames = 0
         self._last_log_time = 0.0
@@ -178,7 +191,8 @@ class NewtonXrBridge:
             self._next_capture_time = now + 1.0 / self.config.capture_fps
         frame = viewer.get_frame(target_image=self._target_image, render_ui=False)
         self._target_image = frame
-        sequence = self._store.update(frame)
+        frame_for_xr = self._maybe_flip_x(frame)
+        sequence = self._store.update(frame_for_xr)
         self._captured_frames = sequence
         _, (width, height), resize_count = self._store.latest()
         if resize_count != self._last_resize_count:
@@ -191,6 +205,21 @@ class NewtonXrBridge:
         if self.config.verbose and now - self._last_log_time >= 5.0:
             print(f"[newton-xr-direct] captured_frames={sequence}", flush=True)
             self._last_log_time = now
+
+    def _maybe_flip_x(self, frame: Any) -> Any:
+        if not self.config.flip_x:
+            return frame
+
+        if self._flipped_image is None or self._flipped_image.shape != frame.shape:
+            self._flipped_image = wp.empty(shape=frame.shape, dtype=wp.uint8, device=frame.device)
+        height, width, _channels = tuple(int(v) for v in frame.shape)
+        wp.launch(
+            _copy_rgb_flip_x,
+            dim=(width, height),
+            inputs=[frame, self._flipped_image, width],
+            device=frame.device,
+        )
+        return self._flipped_image
 
     def stop(self) -> None:
         app = self._app
