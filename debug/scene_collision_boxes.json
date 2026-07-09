@@ -2,7 +2,7 @@
   "collision_boxes": [
     {
       "frame": "scene",
-      "friction": 0.45,
+      "friction": 0.8,
       "name": "scene_collision_box",
       "position": [
         0.58,
