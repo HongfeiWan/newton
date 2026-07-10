@@ -431,8 +431,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/hand_base_link.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_warm_light_grey">
+        <color rgba="0.70 0.72 0.70 1" />
       </material>
     </visual>
     <collision>
@@ -453,8 +453,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/thumb_metacarpals_base1.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_satin_silver">
+        <color rgba="0.78 0.80 0.78 1" />
       </material>
     </visual>
     <collision>
@@ -482,8 +482,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/thumb_metacarpals_base2.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_warm_light_grey">
+        <color rgba="0.70 0.72 0.70 1" />
       </material>
     </visual>
     <collision>
@@ -511,8 +511,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/thumb_metacarpals.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_satin_silver">
+        <color rgba="0.78 0.80 0.78 1" />
       </material>
     </visual>
     <collision>
@@ -540,8 +540,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/thumb_proximal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_medium_grey">
+        <color rgba="0.46 0.48 0.47 1" />
       </material>
     </visual>
     <collision>
@@ -570,8 +570,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/thumb_distal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -600,8 +600,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/index_metacarpals.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_satin_silver">
+        <color rgba="0.78 0.80 0.78 1" />
       </material>
     </visual>
     <collision>
@@ -629,8 +629,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/index_proximal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_medium_grey">
+        <color rgba="0.46 0.48 0.47 1" />
       </material>
     </visual>
     <collision>
@@ -658,8 +658,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/index_middle.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -688,8 +688,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/index_distal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -718,8 +718,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/middle_proximal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_medium_grey">
+        <color rgba="0.46 0.48 0.47 1" />
       </material>
     </visual>
     <collision>
@@ -747,8 +747,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/middle_middle.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -777,8 +777,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/middle_distal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -807,8 +807,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/ring_metacarpals.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_satin_silver">
+        <color rgba="0.78 0.80 0.78 1" />
       </material>
     </visual>
     <collision>
@@ -836,8 +836,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/ring_proximal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_medium_grey">
+        <color rgba="0.46 0.48 0.47 1" />
       </material>
     </visual>
     <collision>
@@ -865,8 +865,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/ring_middle.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -895,8 +895,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/ring_distal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -925,8 +925,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/pinky_metacarpals.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_satin_silver">
+        <color rgba="0.78 0.80 0.78 1" />
       </material>
     </visual>
     <collision>
@@ -954,8 +954,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/pinky_proximal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_medium_grey">
+        <color rgba="0.46 0.48 0.47 1" />
       </material>
     </visual>
     <collision>
@@ -983,8 +983,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/pinky_middle.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
@@ -1013,8 +1013,8 @@
       <geometry>
         <mesh filename="../linkerhand-urdf/l10/right/meshes/pinky_distal.STL" />
       </geometry>
-      <material name="right_l10_silver_white">
-        <color rgba="0.86 0.88 0.88 1" />
+      <material name="right_l10_rubber_dark_grey">
+        <color rgba="0.16 0.17 0.17 1" />
       </material>
     </visual>
     <collision>
