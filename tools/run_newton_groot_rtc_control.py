@@ -38,9 +38,17 @@ if str(REPO_ROOT) not in sys.path:
 
 import newton.examples  # noqa: E402
 from debug import import_dual_nero_linker_l10 as scene_runtime  # noqa: E402
+from teleop_stack.ik import (  # noqa: E402
+    FullPoseDifferentialIkController,
+    FullPoseDifferentialIkControllerConfig,
+    RobotStateSnapshot,
+    TaskSpaceTarget,
+)
 from teleop_stack.ik.nero_can_fk import nero_can_flange_pose_from_joints  # noqa: E402
-from teleop_stack.models import NamedJointValues  # noqa: E402
+from teleop_stack.models import NamedJointValues, Pose7  # noqa: E402
 from teleop_stack.retargeting.hand_config import load_linker_l10_right_hand_spec  # noqa: E402
+from teleop_stack.robots.newton_runtime import NewtonLinkKinematicsModel  # noqa: E402
+from teleop_stack.teleop.spatial_frames import matrix_to_quat_xyzw, quat_xyzw_to_matrix  # noqa: E402
 
 
 DEFAULT_ISAAC_GROOT_ROOT = Path(
@@ -51,6 +59,29 @@ DEFAULT_VLM_MODEL = REPO_ROOT / "checkpoints" / "nvidia" / "Cosmos-Reason2-2B"
 DEFAULT_SMOOTH_DIR = REPO_ROOT / "local_data" / "groot" / "smooth"
 DEFAULT_TRACE_JSONL = REPO_ROOT / "logs" / "groot_newton_rtc" / "trace.jsonl"
 DEFAULT_INSTRUCTION = "pick up the bottle with green cap and place it in the white rectangle area"
+GROOT_INITIAL_RIGHT_ARM_Q = (
+    0.2724284429,
+    1.6012174157,
+    1.4535451076,
+    1.2643514167,
+    0.2993937799,
+    -0.0534419817,
+    0.1828232391,
+)
+GROOT_D405_FOV_DEG = 72.0
+GROOT_D405_CONNECTOR_REL_EULER_DEG = (89.483, -1.020, -2.995)
+GROOT_INITIAL_HAND_COMMAND_Q = (
+    0.1848468184,
+    0.3151794076,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0581703521,
+    0.0262242742,
+    0.1140341759,
+    0.0,
+)
 GROOT_RUNTIME_PACKAGES = {
     "albumentations": "1.4.18",
     "albucore": "0.0.17",
@@ -317,7 +348,46 @@ def _reported_hand_q_to_command(hand_q: np.ndarray) -> np.ndarray:
 
 
 def _rotmat_to_rot6d(rotation: np.ndarray) -> np.ndarray:
-    return np.asarray(rotation, dtype=np.float32).reshape(3, 3)[:2, :].reshape(6)
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    # Nero/L10 training data stores the first two rotation columns.
+    return rotation[:, :2].reshape(6, order="F").astype(np.float32)
+
+
+def _rot6d_to_rotmat(rot6d: np.ndarray) -> np.ndarray:
+    values = np.asarray(rot6d, dtype=np.float64).reshape(6)
+    col0 = values[:3]
+    col1 = values[3:6]
+    col0 = col0 / max(float(np.linalg.norm(col0)), 1.0e-12)
+    col1 = col1 - float(np.dot(col0, col1)) * col0
+    col1 = col1 / max(float(np.linalg.norm(col1)), 1.0e-12)
+    col2 = np.cross(col0, col1)
+    return np.column_stack((col0, col1, col2))
+
+
+def _eef_9d_to_pose(eef_9d: np.ndarray) -> np.ndarray:
+    values = np.asarray(eef_9d, dtype=np.float64).reshape(-1)
+    if values.size < 9 or not np.isfinite(values[:9]).all():
+        raise ValueError(f"EEF target must contain nine finite values, got {values}")
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, 3] = values[:3]
+    pose[:3, :3] = _rot6d_to_rotmat(values[3:9])
+    return pose
+
+
+def _pose7_to_matrix(pose: Pose7) -> np.ndarray:
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, 3] = np.asarray(pose.position_xyz, dtype=np.float64)
+    matrix[:3, :3] = np.asarray(quat_xyzw_to_matrix(pose.quaternion_xyzw), dtype=np.float64)
+    return matrix
+
+
+def _matrix_to_pose7(matrix: np.ndarray) -> Pose7:
+    pose = np.asarray(matrix, dtype=np.float64).reshape(4, 4)
+    rotation = tuple(tuple(float(value) for value in row) for row in pose[:3, :3])
+    return Pose7(
+        position_xyz=tuple(float(value) for value in pose[:3, 3]),
+        quaternion_xyzw=matrix_to_quat_xyzw(rotation),
+    )
 
 
 def _packed_color_to_rgb(image: wp.array[wp.uint32]) -> np.ndarray:
@@ -326,6 +396,60 @@ def _packed_color_to_rgb(image: wp.array[wp.uint32]) -> np.ndarray:
         packed = packed[0]
     packed = np.ascontiguousarray(packed)
     return packed.view(np.uint8).reshape(*packed.shape, 4)[..., :3].copy()
+
+
+def _initialize_right_hand_pose(example: scene_runtime.Example, command_q: tuple[float, ...]) -> None:
+    values = np.asarray(command_q, dtype=np.float32).reshape(-1)
+    if values.size != len(POLICY_HAND_JOINT_NAMES):
+        raise ValueError(f"Initial right hand pose must contain 10 values, got {values.size}")
+
+    spec = load_linker_l10_right_hand_spec()
+    expanded = spec.expand_mimic_joint_values(
+        NamedJointValues(
+            joint_names=POLICY_HAND_JOINT_NAMES,
+            joint_positions=tuple(float(value) for value in values),
+        )
+    )
+    q_start = example.model.joint_q_start.numpy()
+    q_indices = {
+        str(label).rsplit("/", maxsplit=1)[-1]: int(q_start[index])
+        for index, label in enumerate(example.model.joint_label)
+    }
+    joint_q = example.state_0.joint_q.numpy().copy()
+    joint_target_q = example.control.joint_target_q.numpy().copy()
+    applied = 0
+    for name, value in zip(expanded.joint_names, expanded.joint_positions, strict=True):
+        q_index = q_indices.get(f"right_l10_{name}")
+        if q_index is None:
+            continue
+        joint_q[q_index] = float(value)
+        joint_target_q[q_index] = float(value)
+        applied += 1
+
+    device = example.model.device
+    joint_q_wp = wp.array(joint_q, dtype=wp.float32, device=device)
+    target_q_wp = wp.array(joint_target_q, dtype=wp.float32, device=device)
+    wp.copy(example.model.joint_q, joint_q_wp)
+    wp.copy(example.model.joint_target_q, target_q_wp)
+    wp.copy(example.state_0.joint_q, joint_q_wp)
+    wp.copy(example.control.joint_target_q, target_q_wp)
+    newton.eval_fk(example.model, example.state_0.joint_q, example.state_0.joint_qd, example.state_0)
+    wp.copy(example.model.body_q, example.state_0.body_q)
+    example.state_1.assign(example.state_0)
+
+    if hasattr(example, "_initial_joint_q"):
+        example._initial_joint_q = joint_q.copy()  # noqa: SLF001
+    if hasattr(example, "_initial_joint_target_q"):
+        example._initial_joint_target_q = joint_target_q.copy()  # noqa: SLF001
+    if hasattr(example, "_initial_body_q"):
+        example._initial_body_q = example.state_0.body_q.numpy().copy()  # noqa: SLF001
+    if hasattr(example, "_initial_model_body_q"):
+        example._initial_model_body_q = example.model.body_q.numpy().copy()  # noqa: SLF001
+    print(
+        f"[groot-control] initialized right L10 hand from checkpoint pose joints={applied} "
+        f"command={np.round(values, 6).tolist()}",
+        flush=True,
+    )
 
 
 def _first_batch_chunk(action: dict[str, np.ndarray], key: str) -> np.ndarray:
@@ -898,26 +1022,83 @@ class SimVideoHistory:
 
 
 class NewtonPolicyController:
-    """Apply decoded arm and hand targets to the existing Newton drive control."""
+    """Bridge decoded policy targets into Newton EEF IK and L10 drive control."""
 
     def __init__(
         self,
         example: scene_runtime.Example,
         *,
+        arm_control_mode: str,
+        eef_frame_update: str,
+        eef_body_suffix: str,
+        action_dt_s: float,
         max_arm_joint_step: float,
         max_hand_joint_step: float,
+        ik_finite_difference_rad: float,
+        ik_max_task_step_m: float,
+        ik_max_rotation_step_rad: float,
+        ik_position_weight: float,
+        ik_orientation_weight: float,
+        ik_damping_lambda: float,
+        arm_joint_fallback: bool,
     ) -> None:
         self.example = example
+        self.arm_control_mode = str(arm_control_mode)
+        self.eef_frame_update = str(eef_frame_update)
+        self.action_dt_s = max(float(action_dt_s), 1.0e-6)
         self.max_arm_joint_step = max(0.0, float(max_arm_joint_step))
         self.max_hand_joint_step = max(0.0, float(max_hand_joint_step))
+        self.arm_joint_fallback = bool(arm_joint_fallback)
         self.q_index_by_label, self.qd_index_by_label = self._joint_index_maps()
         self.arm_labels = tuple(f"right_joint{index}" for index in range(1, 8))
         self.arm_q_indices = tuple(self._required_q_index(label) for label in self.arm_labels)
+        self.arm_qd_indices = tuple(self._required_qd_index(label) for label in self.arm_labels)
         self.hand_spec = load_linker_l10_right_hand_spec()
         self._target_q = self.example.control.joint_target_q.numpy().copy()
         self._target_qd = self.example.control.joint_target_qd.numpy().copy()
         self._joint_limit_lower = self.example.model.joint_limit_lower.numpy().copy()
         self._joint_limit_upper = self.example.model.joint_limit_upper.numpy().copy()
+        self._policy_from_world_rotation = np.eye(3, dtype=np.float64)
+        self._policy_from_world_translation = np.zeros(3, dtype=np.float64)
+        self._eef_frame_calibrated = False
+
+        self.kinematics = NewtonLinkKinematicsModel(
+            model=self.example.model,
+            side="right",
+            arm_joint_q_indices=self.arm_q_indices,
+            eef_body_suffix=str(eef_body_suffix),
+            finite_difference_rad=float(ik_finite_difference_rad),
+        )
+        initial_q = tuple(float(value) for value in self.arm_q())
+        lower_limits = tuple(float(self._joint_limit_lower[index]) for index in self.arm_qd_indices)
+        upper_limits = tuple(float(self._joint_limit_upper[index]) for index in self.arm_qd_indices)
+        self.ik = FullPoseDifferentialIkController(
+            FullPoseDifferentialIkControllerConfig(
+                seed_joint_positions_rad=initial_q,
+                joint_lower_limits_rad=lower_limits,
+                joint_upper_limits_rad=upper_limits,
+                neutral_joint_positions_rad=initial_q,
+                kinematics_model=self.kinematics,
+                max_task_step_m=float(ik_max_task_step_m),
+                max_rotation_step_rad=float(ik_max_rotation_step_rad),
+                position_weight=float(ik_position_weight),
+                orientation_weight=float(ik_orientation_weight),
+                max_joint_step_rad=self.max_arm_joint_step,
+                max_joint_velocity_rad_s=self.max_arm_joint_step / self.action_dt_s,
+                damping_lambda=float(ik_damping_lambda),
+                posture_bias_gain=0.04,
+                joint_limit_bias_gain=0.35,
+                bias_weight=0.08,
+                joint_limit_soft_margin_rad=0.25,
+            )
+        )
+        self.ik.reset(self._robot_state(timestamp_s=0.0))
+        print(
+            "[groot-control] "
+            f"arm_mode={self.arm_control_mode} eef_frame_update={self.eef_frame_update} "
+            f"eef_body={eef_body_suffix} arm_joint_fallback={self.arm_joint_fallback}",
+            flush=True,
+        )
 
     def _joint_index_maps(self) -> tuple[dict[str, int], dict[str, int]]:
         model = self.example.model
@@ -942,6 +1123,11 @@ class NewtonPolicyController:
             raise KeyError(f"Newton model is missing scalar joint {label!r}")
         return int(self.q_index_by_label[label])
 
+    def _required_qd_index(self, label: str) -> int:
+        if label not in self.qd_index_by_label:
+            raise KeyError(f"Newton model is missing scalar joint DOF {label!r}")
+        return int(self.qd_index_by_label[label])
+
     def _clip_joint(self, label: str, value: float) -> float:
         qd_index = self.qd_index_by_label.get(label)
         if qd_index is None:
@@ -953,6 +1139,84 @@ class NewtonPolicyController:
     def arm_q(self) -> np.ndarray:
         joint_q = self.example.state_0.joint_q.numpy()
         return np.asarray([joint_q[index] for index in self.arm_q_indices], dtype=np.float32)
+
+    def arm_qd(self) -> np.ndarray:
+        joint_qd = self.example.state_0.joint_qd.numpy()
+        return np.asarray([joint_qd[index] for index in self.arm_qd_indices], dtype=np.float32)
+
+    def _robot_state(self, *, timestamp_s: float) -> RobotStateSnapshot:
+        full_joint_q = self.example.state_0.joint_q.numpy()
+        self.kinematics.sync_joint_q(full_joint_q)
+        arm_q = tuple(float(value) for value in self.arm_q())
+        arm_qd = tuple(float(value) for value in self.arm_qd())
+        return RobotStateSnapshot(
+            timestamp_s=float(timestamp_s),
+            joint_positions_rad=arm_q,
+            joint_velocities_rad_s=arm_qd,
+            ee_pose=self.kinematics.forward_pose(arm_q),
+        )
+
+    def calibrate_eef_frame(self, observation_eef_9d: np.ndarray, *, timestamp_s: float) -> dict[str, Any]:
+        if self.arm_control_mode != "eef_ik":
+            return {"enabled": False, "reason": "arm_control_mode_joint_target"}
+        should_update = not self._eef_frame_calibrated or self.eef_frame_update == "replan"
+        if not should_update:
+            return {
+                "enabled": True,
+                "updated": False,
+                "reason": "fixed_frame_already_calibrated",
+                "policy_from_world_translation": self._policy_from_world_translation.copy(),
+                "policy_from_world_rot6d": _rotmat_to_rot6d(self._policy_from_world_rotation),
+            }
+
+        policy_pose = _eef_9d_to_pose(observation_eef_9d)
+        robot_state = self._robot_state(timestamp_s=timestamp_s)
+        assert robot_state.ee_pose is not None
+        world_pose = _pose7_to_matrix(robot_state.ee_pose)
+        rotation = policy_pose[:3, :3] @ world_pose[:3, :3].T
+        translation = policy_pose[:3, 3] - rotation @ world_pose[:3, 3]
+        self._policy_from_world_rotation = rotation
+        self._policy_from_world_translation = translation
+        self._eef_frame_calibrated = True
+        self.ik.reset(robot_state)
+
+        check = self._world_pose_to_policy_pose(world_pose)
+        residual = check[:3, 3] - policy_pose[:3, 3]
+        print(
+            "[groot-eef-frame] calibrated "
+            f"update={self.eef_frame_update} "
+            f"policy_xyz={np.round(policy_pose[:3, 3], 6).tolist()} "
+            f"world_xyz={np.round(world_pose[:3, 3], 6).tolist()} "
+            f"residual={np.round(residual, 9).tolist()}",
+            flush=True,
+        )
+        return {
+            "enabled": True,
+            "updated": True,
+            "reason": "initial_calibration" if self.eef_frame_update == "once" else "replan_calibration",
+            "policy_xyz": policy_pose[:3, 3].copy(),
+            "world_xyz": world_pose[:3, 3].copy(),
+            "policy_from_world_translation": translation.copy(),
+            "policy_from_world_rot6d": _rotmat_to_rot6d(rotation),
+            "residual_xyz": residual.copy(),
+        }
+
+    def _world_pose_to_policy_pose(self, world_pose: np.ndarray) -> np.ndarray:
+        world = np.asarray(world_pose, dtype=np.float64).reshape(4, 4)
+        policy = np.eye(4, dtype=np.float64)
+        policy[:3, 3] = self._policy_from_world_rotation @ world[:3, 3] + self._policy_from_world_translation
+        policy[:3, :3] = self._policy_from_world_rotation @ world[:3, :3]
+        return policy
+
+    def _policy_pose_to_world_pose(self, policy_pose: np.ndarray) -> np.ndarray:
+        if not self._eef_frame_calibrated:
+            raise RuntimeError("EEF action frame has not been calibrated from the current observation")
+        policy = np.asarray(policy_pose, dtype=np.float64).reshape(4, 4)
+        world = np.eye(4, dtype=np.float64)
+        inverse_rotation = self._policy_from_world_rotation.T
+        world[:3, 3] = inverse_rotation @ (policy[:3, 3] - self._policy_from_world_translation)
+        world[:3, :3] = inverse_rotation @ policy[:3, :3]
+        return world
 
     def hand_command_q(self) -> np.ndarray:
         joint_q = self.example.state_0.joint_q.numpy()
@@ -983,27 +1247,84 @@ class NewtonPolicyController:
             raise ValueError(f"Action {key!r} must be a nonempty [T,D] chunk, got {chunk.shape}")
         return chunk[min(max(0, int(index)), chunk.shape[0] - 1)]
 
-    def apply(self, action: dict[str, np.ndarray], action_index: int) -> dict[str, Any]:
+    def _apply_arm_joint_target(self, arm_target: np.ndarray, current_q: np.ndarray) -> None:
+        for slot, label in enumerate(self.arm_labels):
+            if slot >= arm_target.size:
+                break
+            q_index = self.arm_q_indices[slot]
+            desired = self._clip_joint(label, float(arm_target[slot]))
+            if self.max_arm_joint_step > 0.0:
+                desired = float(
+                    np.clip(
+                        desired,
+                        float(current_q[q_index]) - self.max_arm_joint_step,
+                        float(current_q[q_index]) + self.max_arm_joint_step,
+                    )
+                )
+            self._target_q[q_index] = desired
+            self._target_qd[self.arm_qd_indices[slot]] = 0.0
+
+    def _apply_eef_target(self, eef_target: np.ndarray, *, timestamp_s: float) -> dict[str, Any]:
+        policy_pose = _eef_9d_to_pose(eef_target)
+        world_pose = self._policy_pose_to_world_pose(policy_pose)
+        robot_state = self._robot_state(timestamp_s=timestamp_s)
+        assert robot_state.ee_pose is not None
+        current_world_pose = _pose7_to_matrix(robot_state.ee_pose)
+        self.ik.set_target(
+            TaskSpaceTarget(
+                arm_side="right",
+                source_name="groot_rtc",
+                timestamp_s=float(timestamp_s),
+                frame_id=int(round(timestamp_s / self.action_dt_s)),
+                ee_target=_matrix_to_pose7(world_pose),
+                orientation_mode="track_full_orientation",
+                target_frame="world",
+            )
+        )
+        result = self.ik.step(robot_state, dt_s=self.action_dt_s)
+        q_command = np.asarray(result.q_cmd, dtype=np.float64).reshape(-1)
+        if q_command.size < 7 or not np.isfinite(q_command[:7]).all() or result.status.startswith("fault"):
+            raise RuntimeError(f"EEF IK returned status={result.status} q_cmd={q_command}")
+        qd_command = None if result.dq_cmd is None else np.asarray(result.dq_cmd, dtype=np.float64).reshape(-1)
+        for slot, label in enumerate(self.arm_labels):
+            self._target_q[self.arm_q_indices[slot]] = self._clip_joint(label, float(q_command[slot]))
+            self._target_qd[self.arm_qd_indices[slot]] = (
+                0.0 if qd_command is None or slot >= qd_command.size else float(qd_command[slot])
+            )
+        return {
+            "status": result.status,
+            "events": result.events,
+            "policy_target_xyz": policy_pose[:3, 3].copy(),
+            "world_target_xyz": world_pose[:3, 3].copy(),
+            "world_current_xyz": current_world_pose[:3, 3].copy(),
+            "world_target_error_m": float(np.linalg.norm(world_pose[:3, 3] - current_world_pose[:3, 3])),
+            "target_position_error_m": result.target_position_error_m,
+            "target_orientation_error_rad": result.target_orientation_error_rad,
+            "residual_position_error_m": result.residual_position_error_m,
+            "residual_orientation_error_rad": result.residual_orientation_error_rad,
+            "singularity_metric": result.singularity_metric,
+            "damping_scale": result.damping_scale,
+            "q_command": q_command[:7].copy(),
+        }
+
+    def apply(self, action: dict[str, np.ndarray], action_index: int, *, timestamp_s: float) -> dict[str, Any]:
         current_q = self.example.state_0.joint_q.numpy()
         arm_target = self._action_row(action, "arm_joint_target", action_index)
-        if arm_target is not None:
-            for slot, label in enumerate(self.arm_labels):
-                if slot >= arm_target.size:
-                    break
-                q_index = self.arm_q_indices[slot]
-                desired = self._clip_joint(label, float(arm_target[slot]))
-                if self.max_arm_joint_step > 0.0:
-                    desired = float(
-                        np.clip(
-                            desired,
-                            float(current_q[q_index]) - self.max_arm_joint_step,
-                            float(current_q[q_index]) + self.max_arm_joint_step,
-                        )
-                    )
-                self._target_q[q_index] = desired
-                qd_index = self.qd_index_by_label.get(label)
-                if qd_index is not None:
-                    self._target_qd[qd_index] = 0.0
+        eef_target = self._action_row(action, "eef_9d", action_index)
+        arm_source = "hold"
+        eef_applied: dict[str, Any] | None = None
+        eef_error: str | None = None
+        if self.arm_control_mode == "eef_ik" and eef_target is not None:
+            try:
+                eef_applied = self._apply_eef_target(eef_target, timestamp_s=timestamp_s)
+                arm_source = "eef_ik"
+            except Exception as exc:
+                eef_error = str(exc)
+                if not self.arm_joint_fallback:
+                    raise
+        if arm_source != "eef_ik" and arm_target is not None:
+            self._apply_arm_joint_target(arm_target, current_q)
+            arm_source = "arm_joint_target_fallback" if eef_error is not None else "arm_joint_target"
 
         hand_target = self._action_row(action, "hand_joint_target", action_index)
         command_target = None
@@ -1035,8 +1356,12 @@ class NewtonPolicyController:
         self.example.control.joint_target_q = wp.array(self._target_q, dtype=wp.float32, device=device)
         self.example.control.joint_target_qd = wp.array(self._target_qd, dtype=wp.float32, device=device)
         return {
+            "arm_source": arm_source,
             "arm_target": None if arm_target is None else arm_target[:7].copy(),
             "arm_applied": self._target_q[np.asarray(self.arm_q_indices, dtype=np.int32)].copy(),
+            "eef_target": None if eef_target is None else eef_target[:9].copy(),
+            "eef_applied": eef_applied,
+            "eef_error": eef_error,
             "hand_reported_target": None if hand_target is None else hand_target[:10].copy(),
             "hand_command_target": None if command_target is None else command_target.copy(),
         }
@@ -1047,6 +1372,7 @@ class GrootRtcExample(scene_runtime.Example):
         self.groot_args = args
         self.modalities = _validate_asset_layout(args)
         super().__init__(viewer, args)
+        _initialize_right_hand_pose(self, tuple(args.groot_initial_hand_q))
         if self.d455_preview is None or not self.d455_preview.enabled:
             raise ValueError("GR00T simulator images require --d455-preview")
         if self.d405_preview is None or not self.d405_preview.enabled:
@@ -1061,8 +1387,19 @@ class GrootRtcExample(scene_runtime.Example):
         self.action_horizon = len(self.modalities.action.delta_indices)
         self.controller = NewtonPolicyController(
             self,
+            arm_control_mode=str(args.arm_control_mode),
+            eef_frame_update=str(args.eef_frame_update),
+            eef_body_suffix=str(args.eef_body_suffix),
+            action_dt_s=self.action_dt_s,
             max_arm_joint_step=float(args.max_arm_joint_step),
             max_hand_joint_step=float(args.max_hand_joint_step),
+            ik_finite_difference_rad=float(args.ik_finite_difference_rad),
+            ik_max_task_step_m=float(args.ik_max_task_step_m),
+            ik_max_rotation_step_rad=math.radians(float(args.ik_max_rotation_step_deg)),
+            ik_position_weight=float(args.ik_position_weight),
+            ik_orientation_weight=float(args.ik_orientation_weight),
+            ik_damping_lambda=float(args.ik_damping_lambda),
+            arm_joint_fallback=bool(args.arm_joint_fallback),
         )
         self.sim_video_history = SimVideoHistory(self.modalities.video)
         self.seed_manager = TeleopRtcSeedManager(
@@ -1071,6 +1408,7 @@ class GrootRtcExample(scene_runtime.Example):
         )
         self.policy_step = 0
         self.replan_index = 0
+        self._first_observation_dumped = False
         self.action_index = 0
         self.action_chunk: dict[str, np.ndarray] | None = None
         self.next_policy_time_s = 0.0
@@ -1106,15 +1444,24 @@ class GrootRtcExample(scene_runtime.Example):
             f"image_source={self.image_source} state_source={self.state_source} "
             f"episode={self.smooth.episode_index} instruction={self.instruction!r} "
             f"action_hz={args.action_fps:g} replan={self.replan_horizon} "
-            f"rtc={bool(args.rtc)} start_policy={self.policy_enabled}",
+            f"rtc={bool(args.rtc)} arm_control={args.arm_control_mode} "
+            f"start_policy={self.policy_enabled}",
             flush=True,
         )
 
     def _sim_video_observation(self) -> dict[str, np.ndarray]:
         assert self.d455_preview is not None and self.d405_preview is not None
+        ego_view = _packed_color_to_rgb(self.d455_preview.color_image)
+        if self.groot_args.sim_ego_roi:
+            ego_view = scene_runtime._roi_crop_zoom_hwc(  # noqa: SLF001
+                ego_view,
+                zoom=float(self.d455_roi_zoom),
+                center_x=float(self.d455_roi_center_x),
+                center_y=float(self.d455_roi_center_y),
+            )
         self.sim_video_history.append(
             {
-                "ego_view": _packed_color_to_rgb(self.d455_preview.color_image),
+                "ego_view": ego_view,
                 "wrist_view": _packed_color_to_rgb(self.d405_preview.color_image),
             }
         )
@@ -1139,6 +1486,16 @@ class GrootRtcExample(scene_runtime.Example):
             state = self._sim_state_observation()
         language = {key: [[self.instruction]] for key in self.modalities.language.keys}
         observation = {"video": video, "state": state, "language": language}
+        if self.groot_args.dump_first_observation_dir is not None and not self._first_observation_dumped:
+            from PIL import Image
+
+            dump_dir = self.groot_args.dump_first_observation_dir.expanduser().resolve()
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            for key, value in video.items():
+                frame = np.asarray(value, dtype=np.uint8).reshape(-1, *np.asarray(value).shape[-3:])[-1]
+                Image.fromarray(frame).save(dump_dir / f"{key}.png")
+            self._first_observation_dumped = True
+            print(f"[groot] dumped first model observation to {dump_dir}", flush=True)
         metadata = {
             "image_source": self.image_source,
             "state_source": self.state_source,
@@ -1146,6 +1503,7 @@ class GrootRtcExample(scene_runtime.Example):
             "smooth_frame": self.smooth._frame_index(smooth_frame),
             "video_shapes": {key: list(value.shape) for key, value in video.items()},
             "state_shapes": {key: list(value.shape) for key, value in state.items()},
+            "state_latest": {key: np.asarray(value)[0, -1].copy() for key, value in state.items()},
             "image_preprocessing": "raw_rgb_no_manual_resize_or_letterbox",
         }
         return observation, metadata
@@ -1153,6 +1511,11 @@ class GrootRtcExample(scene_runtime.Example):
     def _replan(self) -> None:
         observation, source_metadata = self._build_observation()
         timeline_s = self.policy_step * self.action_dt_s
+        observation_eef = np.asarray(observation["state"]["eef_9d"], dtype=np.float32).reshape(-1, 9)[-1]
+        source_metadata["eef_frame"] = self.controller.calibrate_eef_frame(
+            observation_eef,
+            timestamp_s=timeline_s,
+        )
         rtc_seed, seed_start_s, seed_metadata = self.seed_manager.seed_window(
             anchor_start_s=timeline_s,
             anchor_frame_id=self.policy_step,
@@ -1215,7 +1578,8 @@ class GrootRtcExample(scene_runtime.Example):
         if self.action_chunk is None or self.action_index >= self.replan_horizon:
             self._replan()
         assert self.action_chunk is not None
-        applied = self.controller.apply(self.action_chunk, self.action_index)
+        timeline_s = self.policy_step * self.action_dt_s
+        applied = self.controller.apply(self.action_chunk, self.action_index, timestamp_s=timeline_s)
         _append_jsonl(
             self.trace_path,
             {
@@ -1226,6 +1590,25 @@ class GrootRtcExample(scene_runtime.Example):
                 "applied": applied,
             },
         )
+        log_every = max(0, int(self.groot_args.control_log_every))
+        if log_every > 0 and self.policy_step % log_every == 0:
+            eef = applied.get("eef_applied")
+            if isinstance(eef, dict):
+                print(
+                    "[groot-control] "
+                    f"step={self.policy_step} source={applied['arm_source']} status={eef['status']} "
+                    f"policy_xyz={np.round(eef['policy_target_xyz'], 5).tolist()} "
+                    f"world_xyz={np.round(eef['world_target_xyz'], 5).tolist()} "
+                    f"current_xyz={np.round(eef['world_current_xyz'], 5).tolist()} "
+                    f"error_m={eef['world_target_error_m']:.5f}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[groot-control] step={self.policy_step} source={applied['arm_source']} "
+                    f"eef_error={applied.get('eef_error')}",
+                    flush=True,
+                )
         self.action_index += 1
         self.policy_step += 1
         if int(self.groot_args.max_policy_steps) > 0 and self.policy_step >= int(self.groot_args.max_policy_steps):
@@ -1260,6 +1643,16 @@ def _resolve_policy_device(device: str) -> str:
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
+def _vec10(text: str) -> tuple[float, ...]:
+    parts = tuple(part.strip() for part in str(text).split(",") if part.strip())
+    if len(parts) != 10:
+        raise argparse.ArgumentTypeError("expected 10 comma-separated numbers")
+    try:
+        return tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected numeric comma-separated values") from exc
+
+
 def _add_policy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--isaac-groot-root", type=Path, default=DEFAULT_ISAAC_GROOT_ROOT)
     parser.add_argument("--policy-checkpoint", type=Path, default=DEFAULT_POLICY_CHECKPOINT)
@@ -1270,6 +1663,8 @@ def _add_policy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--smooth-loop", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--image-source", choices=("sim", "smooth"), default="sim")
     parser.add_argument("--state-source", choices=("sim", "smooth"), default="sim")
+    parser.add_argument("--sim-ego-roi", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--groot-initial-hand-q", type=_vec10, default=GROOT_INITIAL_HAND_COMMAND_Q)
     parser.add_argument("--instruction", default="", help="Empty uses the selected smooth episode task.")
     parser.add_argument("--start-policy", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--dry-run-policy", action=argparse.BooleanOptionalAction, default=False)
@@ -1283,11 +1678,23 @@ def _add_policy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rtc-max-overlap-steps", type=int, default=24)
     parser.add_argument("--rtc-frozen-steps", type=int, default=4)
     parser.add_argument("--rtc-ramp-rate", type=float, default=3.0)
+    parser.add_argument("--arm-control-mode", choices=("eef_ik", "joint_target"), default="eef_ik")
+    parser.add_argument("--eef-frame-update", choices=("once", "replan"), default="once")
+    parser.add_argument("--eef-body-suffix", default="/right_revo2_flange")
+    parser.add_argument("--arm-joint-fallback", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-arm-joint-step", type=float, default=0.045)
     parser.add_argument("--max-hand-joint-step", type=float, default=0.08)
+    parser.add_argument("--ik-finite-difference-rad", type=float, default=1.0e-4)
+    parser.add_argument("--ik-max-task-step-m", type=float, default=0.03)
+    parser.add_argument("--ik-max-rotation-step-deg", type=float, default=5.0)
+    parser.add_argument("--ik-position-weight", type=float, default=3.0)
+    parser.add_argument("--ik-orientation-weight", type=float, default=1.0)
+    parser.add_argument("--ik-damping-lambda", type=float, default=0.02)
+    parser.add_argument("--control-log-every", type=int, default=8)
     parser.add_argument("--max-policy-steps", type=int, default=0)
     parser.add_argument("--trace-jsonl", type=Path, default=DEFAULT_TRACE_JSONL)
     parser.add_argument("--no-policy-trace", action="store_true")
+    parser.add_argument("--dump-first-observation-dir", type=Path, default=None)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -1300,6 +1707,9 @@ def create_parser() -> argparse.ArgumentParser:
         d405_preview=True,
         d455_opencv_window=False,
         d405_opencv_window=False,
+        initial_right_arm_q=GROOT_INITIAL_RIGHT_ARM_Q,
+        d405_fov=GROOT_D405_FOV_DEG,
+        d405_connector_rel_euler=GROOT_D405_CONNECTOR_REL_EULER_DEG,
     )
     _add_policy_args(parser)
     return parser

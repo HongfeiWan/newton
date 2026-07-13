@@ -9,6 +9,7 @@ IMAGE_NAME="${NEWTON_GROOT_RTC_IMAGE:-newton-direct-gpu-groot:latest}"
 GPU_INDEX="${NEWTON_GROOT_GPU:-${NEWTON_VR_GPU:-0}}"
 DISPLAY_ARG="${DISPLAY:-:0}"
 ISAAC_GROOT_ROOT="${ISAAC_GROOT_ROOT:-${PROJECT_DIR}/Isaac-GR00T}"
+XAUTHORITY_PATH="${XAUTHORITY:-${HOME}/.Xauthority}"
 CONDA_PYTHON="${REPO_DIR}/conda_envs/newton/bin/python"
 if [[ -x "${CONDA_PYTHON}" ]]; then
     PYTHON_BIN="${NEWTON_GROOT_PYTHON:-${CONDA_PYTHON}}"
@@ -41,6 +42,17 @@ docker_args=(
     -v /dev:/dev
     -w "${REPO_DIR}"
 )
+
+if [[ -f "${XAUTHORITY_PATH}" ]]; then
+    docker_args+=(
+        -e "XAUTHORITY=${XAUTHORITY_PATH}"
+        -v "${XAUTHORITY_PATH}:${XAUTHORITY_PATH}:ro"
+    )
+    if command -v xhost >/dev/null 2>&1; then
+        DISPLAY="${DISPLAY_ARG}" XAUTHORITY="${XAUTHORITY_PATH}" \
+            xhost +SI:localuser:root >/dev/null 2>&1 || true
+    fi
+fi
 
 exec docker run "${docker_args[@]}" "${IMAGE_NAME}" \
     "${PYTHON_BIN}" tools/run_newton_groot_rtc_control.py \

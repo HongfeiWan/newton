@@ -51,10 +51,13 @@ python tools/run_newton_groot_rtc_control.py \
   --start-policy
 ```
 
-The policy receives the raw `1280x800` D455 and `640x480` D405 images. It does
-not receive the D455 `224x224` ROI preview, and the runner does not resize,
-pad, or letterbox either input. The checkpoint processor performs its own
-short-edge resize and center crop.
+The policy receives the raw `640x480` D405 image. For the simulated D455, the
+default `--sim-ego-roi` applies the scene camera's 2x ROI at `(0.50, 0.65)` so
+the bottle, target rectangle, and arm match the framing of the training
+`ego_view`. The resulting `640x400` RGB crop is sent directly to the processor;
+the runner does not resize, pad, or letterbox it. Use `--no-sim-ego-roi` only
+for camera-framing diagnostics. Smooth images are always passed through
+unchanged, and the checkpoint processor performs its own resize and crop.
 
 ## Smooth episode images
 
@@ -83,17 +86,51 @@ every 8 executed actions, at most 24 overlap steps, 4 frozen steps, and an RTC
 ramp rate of 3.0. Use `--no-rtc` for ordinary chunk replanning. Use
 `--dry-run-policy` to test the Newton control loop without loading the model.
 
-The runner executes `arm_joint_target` directly as the right-arm joint target
-and converts the policy's reported L10 hand state convention back to Newton
-hand commands. Per-tick arm and hand changes are bounded by
-`--max-arm-joint-step` and `--max-hand-joint-step`. `eef_9d` is included in the
-observation, prediction, RTC seed, and trace, but is not sent through a second
-IK controller.
+The default `--arm-control-mode eef_ik` treats decoded `eef_9d` as an absolute
+TCP target in the checkpoint's rokae-base frame. At the first replan, the
+runner aligns that frame to the current Newton `/right_revo2_flange` world
+pose, maps each action target into Newton world coordinates, and applies it
+through `NewtonLinkKinematicsModel` and the full-pose differential IK
+controller. `arm_joint_target` is used only if EEF IK fails. Use
+`--arm-control-mode joint_target` to select the old direct joint-alias path, or
+`--no-arm-joint-fallback` to make an IK failure stop execution.
+
+The Nero/L10 `rot6d` layout is the first two rotation-matrix columns in
+column-major order: `[R00, R10, R20, R01, R11, R21]`. This matches the smooth
+training data and the Harness deployment bridge; it is not the first-two-rows
+layout used by some generic rot6d implementations.
+
+This runner also selects the checkpoint/Harness right-arm initial pose instead
+of the generic debug scene pose. The left arm continues to use the URDF initial
+state. Pass the inherited `--initial-right-arm-q q1,...,q7` option only when
+deliberately evaluating a different starting configuration.
+
+The right L10 hand is initialized from the Harness checkpoint command pose so
+its simulated reported state and wrist image begin inside the training
+distribution. Override it with `--groot-initial-hand-q q1,...,q10` only for an
+intentional state-distribution test.
+
+For the Newton pinhole wrist camera, the runner uses a `72` degree vertical FOV
+and a small connector-frame optical-axis correction. Together these reproduce
+the D405's wider horizontal field and keep the nearby bottle in the lower-right
+region seen in training. The generic scene's D405 body mount remains unchanged.
+
+The default frame transform is fixed after the first observation. Use
+`--eef-frame-update replan` only when deliberately recalibrating it at every
+chunk. Per-tick arm and hand changes are bounded by `--max-arm-joint-step` and
+`--max-hand-joint-step`. The trace records policy/world EEF targets, current
+world TCP, IK status, position/orientation error, and the actual arm control
+source for every executed action.
 
 Policy execution is disabled until `--start-policy` is supplied. Every replan
 and executed target is written to the JSONL trace unless `--no-policy-trace`
 is set. For a bounded smoke test, add `--max-policy-steps 9`; step 8 performs
 the first RTC replan with a previous action chunk.
+
+Use `--dump-first-observation-dir PATH` to save the exact current `ego_view`
+and `wrist_view` RGB arrays passed to the checkpoint processor. This is useful
+for checking simulator/training camera alignment without changing image
+preprocessing.
 
 ## Docker runtime
 
@@ -111,12 +148,16 @@ Python runtime inside the container.
 Run with live Newton images on GPU 0:
 
 ```bash
-NEWTON_GROOT_GPU=0 DISPLAY=:1 docker/run_groot_rtc.sh \
+NEWTON_GROOT_GPU=0 docker/run_groot_rtc.sh \
   --viewer gl \
   --image-source sim \
   --state-source sim \
   --start-policy
 ```
+
+For `--viewer gl`, run from the node3 desktop terminal so its current
+`DISPLAY` and `.Xauthority` are available. The wrapper forwards both into the
+container; do not hard-code a display number unless that X socket exists.
 
 Run a recorded episode without opening a viewer:
 
