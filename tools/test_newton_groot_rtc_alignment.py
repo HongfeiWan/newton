@@ -115,6 +115,7 @@ class TestNode0GrootAlignment(unittest.TestCase):
         self.assertEqual(args.eef_transform_mode, "node0_fixed")
         self.assertTrue(args.async_policy)
         self.assertTrue(args.capture_graph)
+        self.assertFalse(args.enforce_bottle_above_scene_collision)
         self.assertEqual(args.camera_preview_fps, 15.0)
         self.assertIsNone(args.viewer_fifo_preview)
         self.assertEqual(
@@ -122,6 +123,22 @@ class TestNode0GrootAlignment(unittest.TestCase):
             (1600, 720),
         )
         self.assertEqual(args.viewer_fifo_preview_input_width, 320)
+
+    def test_action_row_rejects_nonfinite_policy_values(self) -> None:
+        action = {"arm_joint_target": np.asarray(((0.0, np.nan),), dtype=np.float32)}
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            groot_runtime.NewtonPolicyController._action_row(action, "arm_joint_target", 0)
+
+    def test_l10_friction_defaults_to_vr_value(self) -> None:
+        args = groot_runtime.create_parser().parse_args([])
+
+        self.assertEqual(args.l10_friction, 3.0)
+
+    def test_l10_contact_gap_defaults_to_point_one_mm(self) -> None:
+        args = groot_runtime.create_parser().parse_args([])
+
+        self.assertEqual(args.l10_contact_gap, 1.0e-4)
 
     def test_node0_ego_view_crops_before_frame_tap_resize(self) -> None:
         image = np.full((800, 1280, 3), (255, 0, 0), dtype=np.uint8)

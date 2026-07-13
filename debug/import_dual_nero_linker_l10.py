@@ -77,14 +77,14 @@ DEFAULT_ANGULAR_DAMPING = 0.25
 REALISTIC_BOTTLE_MASS_KG = 0.5
 REALISTIC_BOTTLE_TABLE_FRICTION = 0.45
 DYNAMIC_CUBE_SIZE_M = (0.05, 0.05, 0.15)
-L10_CONTACT_FRICTION = 5.0
+L10_CONTACT_FRICTION = 3.0
 L10_CONTACT_TORSIONAL_FRICTION = 0.15
 L10_CONTACT_ROLLING_FRICTION = 0.02
 L10_CONTACT_KE = 8.0e3
 L10_CONTACT_KD = 1.5e3
 L10_CONTACT_KF = 2.5e2
 L10_CONTACT_MARGIN_M = -1.0e-3
-L10_CONTACT_GAP_M = 3.0e-3
+L10_CONTACT_GAP_M = 1.0e-4
 L10_BOTTLE_CONTACT_STOP_ACTIVATION_M = 1.5e-3
 L10_BOTTLE_CONTACT_STOP_PENETRATION_M = 2.0e-3
 L10_BOTTLE_CONTACT_STOP_RELEASE_M = 8.0e-4
@@ -259,8 +259,8 @@ def _filter_urdf_collisions_to_l10_hand(
     l10_kf: float,
     l10_mu_torsional: float,
     l10_mu_rolling: float,
+    l10_contact_gap: float,
     hydroelastic_contacts: bool,
-    hydroelastic_gap: float,
     hydroelastic_sdf_max_resolution: int,
     hydroelastic_sdf_narrow_band_range: tuple[float, float],
     hydroelastic_kh: float,
@@ -287,12 +287,12 @@ def _filter_urdf_collisions_to_l10_hand(
             builder.shape_material_mu_torsional[shape_index] = float(l10_mu_torsional)
             builder.shape_material_mu_rolling[shape_index] = float(l10_mu_rolling)
             builder.shape_margin[shape_index] = L10_CONTACT_MARGIN_M
-            builder.shape_gap[shape_index] = L10_CONTACT_GAP_M
+            builder.shape_gap[shape_index] = float(l10_contact_gap)
             if hydroelastic_contacts:
                 _set_shape_hydroelastic_sdf(
                     builder,
                     shape_index,
-                    gap=hydroelastic_gap,
+                    gap=l10_contact_gap,
                     sdf_max_resolution=hydroelastic_sdf_max_resolution,
                     sdf_narrow_band_range=hydroelastic_sdf_narrow_band_range,
                     kh=hydroelastic_kh,
@@ -300,7 +300,7 @@ def _filter_urdf_collisions_to_l10_hand(
                 if _build_mesh_sdf_for_hydroelastic_shape(
                     builder,
                     shape_index,
-                    gap=hydroelastic_gap,
+                    gap=l10_contact_gap,
                     sdf_max_resolution=hydroelastic_sdf_max_resolution,
                     sdf_narrow_band_range=hydroelastic_sdf_narrow_band_range,
                 ):
@@ -319,7 +319,7 @@ def _filter_urdf_collisions_to_l10_hand(
         f" l10_mu={l10_friction:g}"
         f" l10_ke={l10_ke:g}"
         f" margin={L10_CONTACT_MARGIN_M:g}"
-        f" gap={L10_CONTACT_GAP_M:g}"
+        f" gap={l10_contact_gap:g}"
         f" hydro_shapes={hydro_l10}"
         f" hydro_mesh_sdfs={hydro_mesh_sdfs}"
     )
@@ -1043,7 +1043,6 @@ def _configure_dynamic_bottle_collision(
     torsional_friction: float,
     rolling_friction: float,
     hydroelastic_contacts: bool,
-    hydroelastic_gap: float,
     hydroelastic_sdf_max_resolution: int,
     hydroelastic_sdf_narrow_band_range: tuple[float, float],
     hydroelastic_kh: float,
@@ -1059,7 +1058,7 @@ def _configure_dynamic_bottle_collision(
             _set_shape_hydroelastic_sdf(
                 builder,
                 shape_index,
-                gap=hydroelastic_gap,
+                gap=gap,
                 sdf_max_resolution=hydroelastic_sdf_max_resolution,
                 sdf_narrow_band_range=hydroelastic_sdf_narrow_band_range,
                 kh=hydroelastic_kh,
@@ -1545,8 +1544,8 @@ class Example:
             l10_kf=args.l10_contact_kf,
             l10_mu_torsional=args.l10_torsional_friction,
             l10_mu_rolling=args.l10_rolling_friction,
+            l10_contact_gap=float(args.l10_contact_gap),
             hydroelastic_contacts=bool(args.hydroelastic_contacts),
-            hydroelastic_gap=float(args.hydroelastic_contact_gap),
             hydroelastic_sdf_max_resolution=int(args.hydroelastic_sdf_max_resolution),
             hydroelastic_sdf_narrow_band_range=tuple(args.hydroelastic_sdf_narrow_band_range),
             hydroelastic_kh=float(args.hydroelastic_kh),
@@ -1704,7 +1703,6 @@ class Example:
                     torsional_friction=args.dynamic_bottle_torsional_friction,
                     rolling_friction=args.dynamic_bottle_rolling_friction,
                     hydroelastic_contacts=bool(args.hydroelastic_contacts),
-                    hydroelastic_gap=float(args.hydroelastic_contact_gap),
                     hydroelastic_sdf_max_resolution=int(args.hydroelastic_sdf_max_resolution),
                     hydroelastic_sdf_narrow_band_range=tuple(args.hydroelastic_sdf_narrow_band_range),
                     hydroelastic_kh=float(args.hydroelastic_kh),
@@ -2982,6 +2980,12 @@ class Example:
             help="High friction coefficient for L10 hand contact shapes.",
         )
         parser.add_argument(
+            "--l10-contact-gap",
+            type=float,
+            default=L10_CONTACT_GAP_M,
+            help="Per-shape L10 contact detection gap [m].",
+        )
+        parser.add_argument(
             "--l10-torsional-friction",
             type=float,
             default=L10_CONTACT_TORSIONAL_FRICTION,
@@ -3177,8 +3181,11 @@ class Example:
         parser.add_argument(
             "--enforce-bottle-above-scene-collision",
             action=argparse.BooleanOptionalAction,
-            default=True,
-            help="Project the dynamic bottle back above the scene collision top surface after each solver substep.",
+            default=False,
+            help=(
+                "Project the dynamic bottle back above the scene collision top surface after each solver substep. "
+                "This nonphysical fallback can conflict with grasp contacts and is disabled by default."
+            ),
         )
         parser.add_argument(
             "--bottle-table-guard-clearance",
@@ -3198,7 +3205,7 @@ class Example:
         parser.add_argument(
             "--bottle-pos-y",
             type=float,
-            default=0.0359,
+            default=0.0309,
             help="Dynamic bottle Y offset in scene frame [m].",
         )
         parser.add_argument(

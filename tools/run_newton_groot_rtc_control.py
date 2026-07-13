@@ -613,6 +613,25 @@ def _eef_9d_to_pose(eef_9d: np.ndarray) -> np.ndarray:
     return pose
 
 
+def _require_finite_values(
+    values: np.ndarray,
+    *,
+    name: str,
+    error_type: type[Exception] = RuntimeError,
+) -> np.ndarray:
+    array = np.asarray(values)
+    finite = np.isfinite(array)
+    if finite.all():
+        return array
+    flat = array.reshape(-1)
+    bad_indices = np.flatnonzero(~finite.reshape(-1))[:8]
+    bad_values = [float(flat[index]) for index in bad_indices]
+    raise error_type(
+        f"{name} contains non-finite values at flat indices "
+        f"{bad_indices.astype(int).tolist()}: {bad_values}"
+    )
+
+
 def _pose7_to_matrix(pose: Pose7) -> np.ndarray:
     matrix = np.eye(4, dtype=np.float64)
     matrix[:3, 3] = np.asarray(pose.position_xyz, dtype=np.float64)
@@ -1413,7 +1432,10 @@ class NewtonPolicyController:
         )
         if body_index is None:
             raise ValueError(f"Newton model is missing body ending with {label_suffix!r}")
-        body_q = self.example.state_0.body_q.numpy()[body_index]
+        body_q = _require_finite_values(
+            self.example.state_0.body_q.numpy()[body_index],
+            name=f"Newton body pose {label_suffix!r}",
+        )
         return _pose7_to_matrix(
             Pose7(
                 position_xyz=tuple(float(value) for value in body_q[:3]),
@@ -1431,14 +1453,23 @@ class NewtonPolicyController:
 
     def arm_q(self) -> np.ndarray:
         joint_q = self.example.state_0.joint_q.numpy()
-        return np.asarray([joint_q[index] for index in self.arm_q_indices], dtype=np.float32)
+        return _require_finite_values(
+            np.asarray([joint_q[index] for index in self.arm_q_indices], dtype=np.float32),
+            name="Newton arm joint positions",
+        )
 
     def arm_qd(self) -> np.ndarray:
         joint_qd = self.example.state_0.joint_qd.numpy()
-        return np.asarray([joint_qd[index] for index in self.arm_qd_indices], dtype=np.float32)
+        return _require_finite_values(
+            np.asarray([joint_qd[index] for index in self.arm_qd_indices], dtype=np.float32),
+            name="Newton arm joint velocities",
+        )
 
     def _robot_state(self, *, timestamp_s: float) -> RobotStateSnapshot:
-        full_joint_q = self.example.state_0.joint_q.numpy()
+        full_joint_q = _require_finite_values(
+            self.example.state_0.joint_q.numpy(),
+            name="Newton joint positions before EEF IK",
+        )
         self.kinematics.sync_joint_q(full_joint_q)
         arm_q = tuple(float(value) for value in self.arm_q())
         arm_qd = tuple(float(value) for value in self.arm_qd())
@@ -1585,7 +1616,10 @@ class NewtonPolicyController:
         for name in POLICY_HAND_JOINT_NAMES:
             label = f"right_l10_{name}"
             values.append(float(joint_q[self._required_q_index(label)]))
-        return np.asarray(values, dtype=np.float32)
+        return _require_finite_values(
+            np.asarray(values, dtype=np.float32),
+            name="Newton hand joint positions",
+        )
 
     def state_groups(self) -> dict[str, np.ndarray]:
         arm_q = self.arm_q()
@@ -1606,7 +1640,8 @@ class NewtonPolicyController:
         chunk = np.asarray(action[key], dtype=np.float32)
         if chunk.ndim != 2 or chunk.shape[0] == 0:
             raise ValueError(f"Action {key!r} must be a nonempty [T,D] chunk, got {chunk.shape}")
-        return chunk[min(max(0, int(index)), chunk.shape[0] - 1)]
+        row = chunk[min(max(0, int(index)), chunk.shape[0] - 1)]
+        return _require_finite_values(row, name=f"Action {key!r}", error_type=ValueError)
 
     def _apply_arm_joint_target(self, arm_target: np.ndarray, current_q: np.ndarray) -> None:
         for slot, label in enumerate(self.arm_labels):
@@ -1647,6 +1682,8 @@ class NewtonPolicyController:
         if q_command.size < 7 or not np.isfinite(q_command[:7]).all() or result.status.startswith("fault"):
             raise RuntimeError(f"EEF IK returned status={result.status} q_cmd={q_command}")
         qd_command = None if result.dq_cmd is None else np.asarray(result.dq_cmd, dtype=np.float64).reshape(-1)
+        if qd_command is not None:
+            _require_finite_values(qd_command, name="EEF IK joint velocity command")
         for slot, label in enumerate(self.arm_labels):
             self._target_q[self.arm_q_indices[slot]] = self._clip_joint(label, float(q_command[slot]))
             self._target_qd[self.arm_qd_indices[slot]] = (
@@ -1669,7 +1706,14 @@ class NewtonPolicyController:
         }
 
     def apply(self, action: dict[str, np.ndarray], action_index: int, *, timestamp_s: float) -> dict[str, Any]:
-        current_q = self.example.state_0.joint_q.numpy()
+        current_q = _require_finite_values(
+            self.example.state_0.joint_q.numpy(),
+            name="Newton joint positions before applying policy action",
+        )
+        _require_finite_values(
+            self.example.state_0.joint_qd.numpy(),
+            name="Newton joint velocities before applying policy action",
+        )
         arm_target = self._action_row(action, "arm_joint_target", action_index)
         eef_target = self._action_row(action, "eef_9d", action_index)
         arm_source = "hold"
@@ -1713,6 +1757,8 @@ class NewtonPolicyController:
                 if qd_index is not None:
                     self._target_qd[qd_index] = 0.0
 
+        _require_finite_values(self._target_q, name="Newton joint position control targets")
+        _require_finite_values(self._target_qd, name="Newton joint velocity control targets")
         self.example.control.joint_target_q.assign(self._target_q)
         self.example.control.joint_target_qd.assign(self._target_qd)
         return {
