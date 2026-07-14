@@ -1646,6 +1646,12 @@ class Example:
         print(f"Scene physics config: {args.scene_physics_config}")
         urdf_path = _resolve_urdf(args.urdf)
         builder = newton.ModelBuilder(up_axis=URDF_UP_AXIS, gravity=args.gravity)
+        request_qfrc_actuator = bool(getattr(args, "request_qfrc_actuator", False))
+        world_count = max(1, int(getattr(args, "world_count", 1)))
+        replicate_worlds = bool(getattr(args, "replicate_worlds", False))
+        if request_qfrc_actuator:
+            newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+            builder.request_state_attributes("mujoco:qfrc_actuator")
         builder.rigid_gap = float(args.rigid_gap)
         builder.default_joint_cfg.armature = args.armature
         builder.default_joint_cfg.target_ke = args.target_ke
@@ -1890,6 +1896,15 @@ class Example:
 
         if args.add_ground:
             builder.add_ground_plane()
+
+        if replicate_worlds or world_count > 1:
+            scene_builder = newton.ModelBuilder(up_axis=URDF_UP_AXIS, gravity=args.gravity)
+            if request_qfrc_actuator:
+                newton.solvers.SolverMuJoCo.register_custom_attributes(scene_builder)
+                scene_builder.request_state_attributes("mujoco:qfrc_actuator")
+            scene_builder.rigid_gap = builder.rigid_gap
+            scene_builder.replicate(builder, world_count=world_count)
+            builder = scene_builder
 
         self.model = builder.finalize(device=args.device)
         self.state_0 = self.model.state()
