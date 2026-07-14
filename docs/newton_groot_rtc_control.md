@@ -177,6 +177,27 @@ NEWTON_GROOT_GPU=0 docker/run_groot_rtc.sh \
   --start-policy
 ```
 
+The default scene physics profile is
+`configs/scene_physics/groot_rtc.json`. It centralizes the L10 hand contact and
+drive properties, bottle contact properties and initial pose, table friction,
+and shared hydroelastic parameters. The referenced
+`debug/dynamic_bottle_body.json` and `debug/scene_collision_boxes.json` files
+continue to own bottle and table geometry. The JSON profile is parsed once at
+startup; Newton then stores the resulting model properties on the selected GPU.
+
+Select another profile with `--scene-physics-config PATH`. Explicit physics
+arguments later on the command line override values loaded from the profile:
+
+```bash
+NEWTON_GROOT_GPU=0 docker/run_groot_rtc.sh \
+  --scene-physics-config configs/scene_physics/groot_rtc.json \
+  --l10-friction 2.5 \
+  --viewer gl \
+  --image-source sim \
+  --state-source sim \
+  --start-policy
+```
+
 The wrapper defaults to the teleoperation stack's direct-GPU rendering path.
 Newton creates a headless NVIDIA EGL context, keeps physics, camera rendering,
 and GR00T inference on the selected GPU, and limits the simulation render loop

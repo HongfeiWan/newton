@@ -39,6 +39,7 @@ DEFAULT_URDF = REPO_ROOT / "assets" / "generated" / "dual_nero_linker_l10_combin
 DEFAULT_SCENE_GLB = REPO_ROOT / "scene" / "scene.glb"
 DEFAULT_SCENE_COLLISION_SPEC = REPO_ROOT / "debug" / "scene_collision_boxes.json"
 DEFAULT_DYNAMIC_BOTTLE_SPEC = REPO_ROOT / "debug" / "dynamic_bottle_body.json"
+DEFAULT_SCENE_PHYSICS_CONFIG = REPO_ROOT / "configs" / "scene_physics" / "groot_rtc.json"
 DEFAULT_HARNESS_ROOT = Path("/home/whf/Project/harness")
 DEFAULT_D455_JSON = REPO_ROOT / "assets" / "d455json.json"
 DEFAULT_D405_JSON = REPO_ROOT / "assets" / "d405json.json"
@@ -101,6 +102,132 @@ HYDROELASTIC_CONTACT_GAP_M = 1.0e-2
 HYDROELASTIC_SDF_MAX_RESOLUTION = 64
 HYDROELASTIC_SDF_NARROW_BAND_RANGE = (-1.0e-2, 1.0e-2)
 HYDROELASTIC_KH = 1.0e11
+
+SCENE_PHYSICS_CONFIG_KEYS = {
+    "simulation": {
+        "angular_damping": ("angular_damping", float),
+        "rigid_contact_relaxation": ("rigid_contact_relaxation", float),
+        "rigid_gap_m": ("rigid_gap", float),
+    },
+    "hydroelastic": {
+        "contact_gap_m": ("hydroelastic_contact_gap", float),
+        "enabled": ("hydroelastic_contacts", bool),
+        "kh": ("hydroelastic_kh", float),
+        "rigid_contact_max": ("hydroelastic_rigid_contact_max", int),
+        "sdf_max_resolution": ("hydroelastic_sdf_max_resolution", int),
+        "sdf_narrow_band_range_m": ("hydroelastic_sdf_narrow_band_range", tuple),
+    },
+    "table": {
+        "collision_spec": ("scene_collision_spec", Path),
+        "rolling_friction": ("scene_rolling_friction", float),
+        "sliding_friction": ("scene_friction", float),
+        "torsional_friction": ("scene_torsional_friction", float),
+    },
+    "bottle": {
+        "body_spec": ("dynamic_bottle_spec", Path),
+        "contact_gap_m": ("dynamic_bottle_contact_gap", float),
+        "contact_margin_m": ("dynamic_bottle_contact_margin", float),
+        "initial_position_m": ("bottle_position", tuple),
+        "initial_rpy_deg": ("bottle_rpy_deg", tuple),
+        "lift_above_table": ("lift_bottle_above_scene_collision", bool),
+        "rolling_friction": ("dynamic_bottle_rolling_friction", float),
+        "sliding_friction": ("dynamic_bottle_friction", float),
+        "table_clearance_m": ("bottle_scene_collision_clearance", float),
+        "table_guard_clearance_m": ("bottle_table_guard_clearance", float),
+        "table_guard_enabled": ("enforce_bottle_above_scene_collision", bool),
+        "torsional_friction": ("dynamic_bottle_torsional_friction", float),
+    },
+    "l10_hand": {
+        "contact_damping": ("l10_contact_kd", float),
+        "contact_gap_m": ("l10_contact_gap", float),
+        "contact_margin_m": ("l10_contact_margin", float),
+        "contact_stiffness": ("l10_contact_ke", float),
+        "drive_armature": ("drive_hand_armature", float),
+        "drive_damping": ("drive_hand_target_kd", float),
+        "drive_effort_limit": ("drive_hand_effort_limit", float),
+        "drive_stiffness": ("drive_hand_target_ke", float),
+        "friction_response_gain": ("l10_contact_kf", float),
+        "rolling_friction": ("l10_rolling_friction", float),
+        "sliding_friction": ("l10_friction", float),
+        "torsional_friction": ("l10_torsional_friction", float),
+    },
+    "l10_bottle_contact_stop": {
+        "activation_m": ("l10_bottle_contact_stop_activation", float),
+        "enabled": ("l10_bottle_contact_stop", bool),
+        "penetration_m": ("l10_bottle_contact_stop_penetration", float),
+        "release_m": ("l10_bottle_contact_stop_release", float),
+        "release_retreat_rad": ("l10_bottle_contact_release_retreat_rad", float),
+        "retreat_rad": ("l10_bottle_contact_stop_retreat_rad", float),
+    },
+}
+
+
+def _resolve_scene_physics_config_path(path: Path) -> Path:
+    resolved = path.expanduser()
+    if not resolved.is_absolute():
+        resolved = REPO_ROOT / resolved
+    return resolved.resolve()
+
+
+def _scene_physics_config_path_from_cli() -> Path:
+    default_path = Path(os.environ.get("NEWTON_SCENE_PHYSICS_CONFIG", DEFAULT_SCENE_PHYSICS_CONFIG))
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--scene-physics-config", type=Path, default=default_path)
+    args, _ = pre_parser.parse_known_args()
+    return _resolve_scene_physics_config_path(args.scene_physics_config)
+
+
+def _load_scene_physics_defaults(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Scene physics config does not exist: {path}")
+    with path.open(encoding="utf-8") as config_file:
+        data = json.load(config_file)
+    if data.get("format") != "newton_scene_physics_v1":
+        raise ValueError(f"Unsupported scene physics config format in {path}")
+
+    unknown_sections = set(data) - {"format", *SCENE_PHYSICS_CONFIG_KEYS}
+    if unknown_sections:
+        raise ValueError(f"Unknown scene physics config sections: {sorted(unknown_sections)}")
+
+    defaults: dict[str, object] = {}
+    for section_name, fields in SCENE_PHYSICS_CONFIG_KEYS.items():
+        section = data.get(section_name, {})
+        if not isinstance(section, dict):
+            raise ValueError(f"Scene physics section {section_name!r} must be an object")
+        unknown_fields = set(section) - set(fields)
+        if unknown_fields:
+            raise ValueError(f"Unknown fields in scene physics section {section_name!r}: {sorted(unknown_fields)}")
+        for config_key, (argument_name, converter) in fields.items():
+            if config_key not in section:
+                continue
+            value = section[config_key]
+            if converter is bool:
+                if not isinstance(value, bool):
+                    raise ValueError(f"Scene physics field {section_name}.{config_key} must be a boolean")
+                converted = value
+            elif converter is Path:
+                converted = _resolve_scene_physics_config_path(Path(value))
+            elif converter is tuple:
+                if not isinstance(value, list):
+                    raise ValueError(f"Scene physics field {section_name}.{config_key} must be an array")
+                converted = tuple(float(item) for item in value)
+            else:
+                converted = converter(value)
+            defaults[argument_name] = converted
+
+    for vector_key in ("bottle_position", "bottle_rpy_deg"):
+        if vector_key in defaults and len(defaults[vector_key]) != 3:
+            raise ValueError(f"Scene physics field mapped to {vector_key} must contain three values")
+    if "hydroelastic_sdf_narrow_band_range" in defaults:
+        if len(defaults["hydroelastic_sdf_narrow_band_range"]) != 2:
+            raise ValueError("Hydroelastic SDF narrow-band range must contain two values")
+    if "bottle_position" in defaults:
+        position = defaults.pop("bottle_position")
+        defaults.update(bottle_pos_x=position[0], bottle_pos_y=position[1], bottle_pos_z=position[2])
+    if "bottle_rpy_deg" in defaults:
+        rpy_deg = defaults.pop("bottle_rpy_deg")
+        defaults.update(bottle_roll=rpy_deg[0], bottle_pitch=rpy_deg[1], bottle_yaw=rpy_deg[2])
+    return defaults
 
 
 @dataclass
@@ -259,6 +386,7 @@ def _filter_urdf_collisions_to_l10_hand(
     l10_kf: float,
     l10_mu_torsional: float,
     l10_mu_rolling: float,
+    l10_contact_margin: float,
     l10_contact_gap: float,
     hydroelastic_contacts: bool,
     hydroelastic_sdf_max_resolution: int,
@@ -286,7 +414,7 @@ def _filter_urdf_collisions_to_l10_hand(
             builder.shape_material_kf[shape_index] = float(l10_kf)
             builder.shape_material_mu_torsional[shape_index] = float(l10_mu_torsional)
             builder.shape_material_mu_rolling[shape_index] = float(l10_mu_rolling)
-            builder.shape_margin[shape_index] = L10_CONTACT_MARGIN_M
+            builder.shape_margin[shape_index] = float(l10_contact_margin)
             builder.shape_gap[shape_index] = float(l10_contact_gap)
             if hydroelastic_contacts:
                 _set_shape_hydroelastic_sdf(
@@ -318,7 +446,7 @@ def _filter_urdf_collisions_to_l10_hand(
         f" disabled_non_l10_shapes={disabled_non_l10}"
         f" l10_mu={l10_friction:g}"
         f" l10_ke={l10_ke:g}"
-        f" margin={L10_CONTACT_MARGIN_M:g}"
+        f" margin={l10_contact_margin:g}"
         f" gap={l10_contact_gap:g}"
         f" hydro_shapes={hydro_l10}"
         f" hydro_mesh_sdfs={hydro_mesh_sdfs}"
@@ -1515,6 +1643,7 @@ class Example:
         self.l10_bottle_contact_stop_threshold_m = max(0.0, float(args.l10_bottle_contact_stop_penetration))
         self.l10_bottle_contact_stop_release_m = max(0.0, float(args.l10_bottle_contact_stop_release))
 
+        print(f"Scene physics config: {args.scene_physics_config}")
         urdf_path = _resolve_urdf(args.urdf)
         builder = newton.ModelBuilder(up_axis=URDF_UP_AXIS, gravity=args.gravity)
         builder.rigid_gap = float(args.rigid_gap)
@@ -1544,6 +1673,7 @@ class Example:
             l10_kf=args.l10_contact_kf,
             l10_mu_torsional=args.l10_torsional_friction,
             l10_mu_rolling=args.l10_rolling_friction,
+            l10_contact_margin=float(args.l10_contact_margin),
             l10_contact_gap=float(args.l10_contact_gap),
             hydroelastic_contacts=bool(args.hydroelastic_contacts),
             hydroelastic_sdf_max_resolution=int(args.hydroelastic_sdf_max_resolution),
@@ -1607,6 +1737,9 @@ class Example:
         scene_collision_boxes: list[SceneCollisionBox] = []
         if self.scene_collision_spec_path is not None:
             scene_collision_boxes = _load_scene_collision_boxes(self.scene_collision_spec_path)
+            if args.scene_friction is not None:
+                for box in scene_collision_boxes:
+                    box.friction = float(args.scene_friction)
             _add_scene_collision_boxes(
                 builder,
                 scene_collision_boxes,
@@ -1625,6 +1758,7 @@ class Example:
                 "Loaded scene collision boxes:"
                 f" spec={self.scene_collision_spec_path}"
                 f" boxes={len(scene_collision_boxes)}"
+                f" sliding_friction={args.scene_friction if args.scene_friction is not None else 'per-box'}"
                 f" torsional_friction={args.scene_torsional_friction:g}"
                 f" rolling_friction={args.scene_rolling_friction:g}"
             )
@@ -2709,9 +2843,17 @@ class Example:
 
     @staticmethod
     def create_parser():
+        scene_physics_config = _scene_physics_config_path_from_cli()
+        scene_physics_defaults = _load_scene_physics_defaults(scene_physics_config)
         parser = newton.examples.create_parser()
         parser.description = __doc__
         parser.set_defaults(device="cuda:0", viewer="gl", paused=False)
+        parser.add_argument(
+            "--scene-physics-config",
+            type=Path,
+            default=scene_physics_config,
+            help="Scene physics JSON. Explicit command-line physics arguments override its values.",
+        )
         parser.add_argument(
             "urdf",
             nargs="?",
@@ -2986,6 +3128,12 @@ class Example:
             help="Per-shape L10 contact detection gap [m].",
         )
         parser.add_argument(
+            "--l10-contact-margin",
+            type=float,
+            default=L10_CONTACT_MARGIN_M,
+            help="L10 contact surface margin [m].",
+        )
+        parser.add_argument(
             "--l10-torsional-friction",
             type=float,
             default=L10_CONTACT_TORSIONAL_FRICTION,
@@ -3022,6 +3170,12 @@ class Example:
         parser.add_argument("--scene-pitch", type=float, default=180.0, help="Initial scene.glb pitch [deg].")
         parser.add_argument("--scene-yaw", type=float, default=0.0, help="Initial scene.glb yaw [deg].")
         parser.add_argument("--scene-scale", type=float, default=1.0, help="Initial scene.glb uniform scale.")
+        parser.add_argument(
+            "--scene-friction",
+            type=float,
+            default=None,
+            help="Uniform sliding friction coefficient for scene collision boxes; defaults to each box specification.",
+        )
         parser.add_argument(
             "--scene-torsional-friction",
             type=float,
@@ -3810,6 +3964,7 @@ class Example:
         )
         parser.add_argument("--d455-fov", type=float, default=None, help="Override D455 vertical FOV [deg].")
         parser.add_argument("--d405-fov", type=float, default=None, help="Override D405 vertical FOV [deg].")
+        parser.set_defaults(**scene_physics_defaults)
         return parser
 
 

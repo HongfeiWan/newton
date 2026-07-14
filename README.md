@@ -24,6 +24,10 @@ NEWTON_GROOT_GPU=0 docker/run_groot_rtc.sh \
 
 该命令使用仿真实时图像和仿真状态作为模型输入，并在场景启动后立即开始策略推理。更多参数见 [Newton GR00T RTC control](docs/newton_groot_rtc_control.md)。
 
+桌面、瓶子和 L10 手的默认物理参数集中在
+[`configs/scene_physics/groot_rtc.json`](configs/scene_physics/groot_rtc.json)。修改该文件后重启容器即可生效；也可以通过
+`--scene-physics-config PATH` 选择另一份配置。命令行中显式传入的物理参数优先于配置文件。
+
 ## 非 Docker 启动
 
 需要在 `newton` conda 环境中启动：

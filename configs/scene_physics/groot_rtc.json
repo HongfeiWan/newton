@@ -1,0 +1,69 @@
+{
+  "format": "newton_scene_physics_v1",
+  "simulation": {
+    "angular_damping": 0.25,
+    "rigid_contact_relaxation": 0.0015,
+    "rigid_gap_m": 0.0001
+  },
+  "hydroelastic": {
+    "contact_gap_m": 0.01,
+    "enabled": true,
+    "kh": 100000000000.0,
+    "rigid_contact_max": 4096,
+    "sdf_max_resolution": 64,
+    "sdf_narrow_band_range_m": [
+      -0.01,
+      0.01
+    ]
+  },
+  "table": {
+    "collision_spec": "debug/scene_collision_boxes.json",
+    "rolling_friction": 0.02,
+    "sliding_friction": 0.8,
+    "torsional_friction": 0.03
+  },
+  "bottle": {
+    "body_spec": "debug/dynamic_bottle_body.json",
+    "contact_gap_m": 0.0005,
+    "contact_margin_m": 0.0,
+    "initial_position_m": [
+      0.5374,
+      0.0309,
+      -0.6752
+    ],
+    "initial_rpy_deg": [
+      -180.0,
+      0.0,
+      0.0
+    ],
+    "lift_above_table": true,
+    "rolling_friction": 0.02,
+    "sliding_friction": 0.45,
+    "table_clearance_m": 0.002,
+    "table_guard_clearance_m": -0.0005,
+    "table_guard_enabled": false,
+    "torsional_friction": 0.03
+  },
+  "l10_hand": {
+    "contact_damping": 1500.0,
+    "contact_gap_m": 0.0001,
+    "contact_margin_m": -0.001,
+    "contact_stiffness": 8000.0,
+    "drive_armature": 0.02,
+    "drive_damping": 5.0,
+    "drive_effort_limit": 3.0,
+    "drive_stiffness": 150.0,
+    "friction_response_gain": 250.0,
+    "rolling_friction": 0.02,
+    "sliding_friction": 3.0,
+    "torsional_friction": 0.15
+  },
+  "l10_bottle_contact_stop": {
+    "activation_m": 0.0015,
+    "enabled": true,
+    "penetration_m": 0.002,
+    "release_m": 0.0008,
+    "release_retreat_rad": 0.0,
+    "retreat_rad": 0.01
+  }
+}

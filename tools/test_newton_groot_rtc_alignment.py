@@ -140,6 +140,24 @@ class TestNode0GrootAlignment(unittest.TestCase):
 
         self.assertEqual(args.l10_contact_gap, 1.0e-4)
 
+    def test_scene_physics_config_supplies_contact_defaults(self) -> None:
+        args = groot_runtime.create_parser().parse_args([])
+
+        self.assertEqual(args.scene_physics_config, groot_runtime.scene_runtime.DEFAULT_SCENE_PHYSICS_CONFIG)
+        self.assertEqual(args.scene_friction, 0.8)
+        self.assertEqual(args.dynamic_bottle_friction, 0.45)
+        self.assertEqual(args.dynamic_bottle_contact_gap, 5.0e-4)
+        self.assertEqual(args.l10_contact_margin, -1.0e-3)
+        self.assertTrue(args.hydroelastic_contacts)
+
+    def test_cli_overrides_scene_physics_config(self) -> None:
+        args = groot_runtime.create_parser().parse_args(
+            ["--l10-friction", "2.5", "--dynamic-bottle-contact-gap", "0.0002"]
+        )
+
+        self.assertEqual(args.l10_friction, 2.5)
+        self.assertEqual(args.dynamic_bottle_contact_gap, 2.0e-4)
+
     def test_node0_ego_view_crops_before_frame_tap_resize(self) -> None:
         image = np.full((800, 1280, 3), (255, 0, 0), dtype=np.uint8)
         image[320:720, 320:960] = (0, 127, 0)
