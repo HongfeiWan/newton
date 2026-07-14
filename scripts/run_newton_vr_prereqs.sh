@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCENE_PHYSICS_CONFIG="${NEWTON_SCENE_PHYSICS_CONFIG:-${REPO_ROOT}/configs/scene_physics/groot_rtc.json}"
 
 export ISAAC_TELEOP_ROOT="${ISAAC_TELEOP_ROOT:-${REPO_ROOT}/../IsaacTeleop}"
 DISPLAY_ARG="${DISPLAY:-:0}"
@@ -360,6 +361,11 @@ fi
 if [[ "${WITH_SCENE}" -eq 1 && ! -f "${REPO_ROOT}/debug/import_dual_nero_linker_l10.py" ]]; then
     check_error "missing debug/import_dual_nero_linker_l10.py"
 fi
+if [[ "${WITH_SCENE}" -eq 1 && ! -f "${SCENE_PHYSICS_CONFIG}" ]]; then
+    check_error "missing scene physics config: ${SCENE_PHYSICS_CONFIG}"
+elif [[ "${WITH_SCENE}" -eq 1 ]]; then
+    check_ok "scene physics config=${SCENE_PHYSICS_CONFIG}"
+fi
 
 if [[ "${CHECK_ONLY}" -eq 1 ]]; then
     if [[ "${failures}" -eq 0 ]]; then
@@ -687,22 +693,46 @@ if [[ "${WITH_SCENE}" -eq 1 ]]; then
         scene_perf_args+=(--teleop-loop-hz "${NEWTON_TELEOP_LOOP_HZ}")
     fi
     scene_bottle_args=(
+        --scene-physics-config "${SCENE_PHYSICS_CONFIG}"
         --dynamic-object-shape "${NEWTON_DYNAMIC_OBJECT_SHAPE:-cylinder}"
-        --dynamic-bottle-spec "${NEWTON_DYNAMIC_BOTTLE_SPEC:-${REPO_ROOT}/debug/dynamic_bottle_body.json}"
     )
-    scene_contact_args=(
-        --drive-hand-target-ke "${NEWTON_DRIVE_HAND_TARGET_KE:-80}"
-        --drive-hand-target-kd "${NEWTON_DRIVE_HAND_TARGET_KD:-15}"
-        --drive-hand-effort-limit "${NEWTON_DRIVE_HAND_EFFORT_LIMIT:-0.8}"
-        --l10-friction "${NEWTON_L10_FRICTION:-3.0}"
-        --l10-torsional-friction "${NEWTON_L10_TORSIONAL_FRICTION:-0.06}"
-        --l10-rolling-friction "${NEWTON_L10_ROLLING_FRICTION:-0.005}"
-        --l10-bottle-contact-stop-activation "${NEWTON_L10_BOTTLE_CONTACT_STOP_ACTIVATION:-0.0015}"
-        --l10-bottle-contact-stop-penetration "${NEWTON_L10_BOTTLE_CONTACT_STOP_PENETRATION:-0.00035}"
-        --l10-bottle-contact-stop-release "${NEWTON_L10_BOTTLE_CONTACT_STOP_RELEASE:-0.00015}"
-        --l10-bottle-contact-stop-retreat-rad "${NEWTON_L10_BOTTLE_CONTACT_STOP_RETREAT_RAD:-0.0015}"
-        --l10-bottle-contact-release-retreat-rad "${NEWTON_L10_BOTTLE_CONTACT_RELEASE_RETREAT_RAD:-0.02}"
-    )
+    if [[ -n "${NEWTON_DYNAMIC_BOTTLE_SPEC:-}" ]]; then
+        scene_bottle_args+=(--dynamic-bottle-spec "${NEWTON_DYNAMIC_BOTTLE_SPEC}")
+    fi
+    scene_contact_args=()
+    if [[ -n "${NEWTON_DRIVE_HAND_TARGET_KE:-}" ]]; then
+        scene_contact_args+=(--drive-hand-target-ke "${NEWTON_DRIVE_HAND_TARGET_KE}")
+    fi
+    if [[ -n "${NEWTON_DRIVE_HAND_TARGET_KD:-}" ]]; then
+        scene_contact_args+=(--drive-hand-target-kd "${NEWTON_DRIVE_HAND_TARGET_KD}")
+    fi
+    if [[ -n "${NEWTON_DRIVE_HAND_EFFORT_LIMIT:-}" ]]; then
+        scene_contact_args+=(--drive-hand-effort-limit "${NEWTON_DRIVE_HAND_EFFORT_LIMIT}")
+    fi
+    if [[ -n "${NEWTON_L10_FRICTION:-}" ]]; then
+        scene_contact_args+=(--l10-friction "${NEWTON_L10_FRICTION}")
+    fi
+    if [[ -n "${NEWTON_L10_TORSIONAL_FRICTION:-}" ]]; then
+        scene_contact_args+=(--l10-torsional-friction "${NEWTON_L10_TORSIONAL_FRICTION}")
+    fi
+    if [[ -n "${NEWTON_L10_ROLLING_FRICTION:-}" ]]; then
+        scene_contact_args+=(--l10-rolling-friction "${NEWTON_L10_ROLLING_FRICTION}")
+    fi
+    if [[ -n "${NEWTON_L10_BOTTLE_CONTACT_STOP_ACTIVATION:-}" ]]; then
+        scene_contact_args+=(--l10-bottle-contact-stop-activation "${NEWTON_L10_BOTTLE_CONTACT_STOP_ACTIVATION}")
+    fi
+    if [[ -n "${NEWTON_L10_BOTTLE_CONTACT_STOP_PENETRATION:-}" ]]; then
+        scene_contact_args+=(--l10-bottle-contact-stop-penetration "${NEWTON_L10_BOTTLE_CONTACT_STOP_PENETRATION}")
+    fi
+    if [[ -n "${NEWTON_L10_BOTTLE_CONTACT_STOP_RELEASE:-}" ]]; then
+        scene_contact_args+=(--l10-bottle-contact-stop-release "${NEWTON_L10_BOTTLE_CONTACT_STOP_RELEASE}")
+    fi
+    if [[ -n "${NEWTON_L10_BOTTLE_CONTACT_STOP_RETREAT_RAD:-}" ]]; then
+        scene_contact_args+=(--l10-bottle-contact-stop-retreat-rad "${NEWTON_L10_BOTTLE_CONTACT_STOP_RETREAT_RAD}")
+    fi
+    if [[ -n "${NEWTON_L10_BOTTLE_CONTACT_RELEASE_RETREAT_RAD:-}" ]]; then
+        scene_contact_args+=(--l10-bottle-contact-release-retreat-rad "${NEWTON_L10_BOTTLE_CONTACT_RELEASE_RETREAT_RAD}")
+    fi
     if [[ "${NEWTON_TELEOP_HAND_PUBLISH_KINEMATIC_VELOCITY:-0}" == "1" ]]; then
         scene_contact_args+=(--teleop-hand-publish-kinematic-velocity)
     else

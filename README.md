@@ -26,7 +26,8 @@ NEWTON_GROOT_GPU=0 docker/run_groot_rtc.sh \
 
 桌面、瓶子和 L10 手的默认物理参数集中在
 [`configs/scene_physics/groot_rtc.json`](configs/scene_physics/groot_rtc.json)。修改该文件后重启容器即可生效；也可以通过
-`--scene-physics-config PATH` 选择另一份配置。命令行中显式传入的物理参数优先于配置文件。
+`--scene-physics-config PATH` 选择另一份配置。GR00T 推理和 VR 遥操默认共享该配置，命令行或对应
+`NEWTON_*` 环境变量中显式传入的物理参数优先于配置文件。
 
 ## 非 Docker 启动
 

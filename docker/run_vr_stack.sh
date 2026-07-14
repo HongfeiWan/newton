@@ -94,6 +94,7 @@ reexec_with_docker_group_if_possible() {
     append_env_assignment_if_set NEWTON_VR_OUTPUT_MODE
     append_env_assignment_if_set NEWTON_DYNAMIC_OBJECT_SHAPE
     append_env_assignment_if_set NEWTON_DYNAMIC_BOTTLE_SPEC
+    append_env_assignment_if_set NEWTON_SCENE_PHYSICS_CONFIG
     append_env_assignment_if_set IMAGE_NAME
     append_env_assignment_if_set NEWTON_DIRECT_GPU_IMAGE
     cmd+=" exec $(shell_quote "$0")"
@@ -215,7 +216,7 @@ docker_args=(
     -e "NEWTON_VR_OUTPUT_MODE=${VR_OUTPUT_MODE}"
     -e "NEWTON_VR_GPU=${NEWTON_VR_GPU}"
     -e "NEWTON_DYNAMIC_OBJECT_SHAPE=${NEWTON_DYNAMIC_OBJECT_SHAPE:-cylinder}"
-    -e "NEWTON_DYNAMIC_BOTTLE_SPEC=${NEWTON_DYNAMIC_BOTTLE_SPEC:-${REPO_DIR}/debug/dynamic_bottle_body.json}"
+    -e "NEWTON_SCENE_PHYSICS_CONFIG=${NEWTON_SCENE_PHYSICS_CONFIG:-${REPO_DIR}/configs/scene_physics/groot_rtc.json}"
     -e "NV_DEVICE_PROFILE=${NV_DEVICE_PROFILE:-Quest3}"
     -e "NV_CXR_ENABLE_PUSH_DEVICES=${NV_CXR_ENABLE_PUSH_DEVICES:-0}"
     -e "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES_ARG}"
@@ -229,6 +230,10 @@ docker_args=(
     -v /run/udev:/run/udev:rw
     -v /var/run/docker.sock:/var/run/docker.sock
 )
+
+if [[ -n "${NEWTON_DYNAMIC_BOTTLE_SPEC:-}" ]]; then
+    docker_args+=(-e "NEWTON_DYNAMIC_BOTTLE_SPEC=${NEWTON_DYNAMIC_BOTTLE_SPEC}")
+fi
 
 if [[ -n "${CUDA_VISIBLE_DEVICES_ARG}" ]]; then
     docker_args+=(-e "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES_ARG}")

@@ -148,6 +148,7 @@ HOST_IP="${HOST_IP:-127.0.0.1}"
 
 if [[ "${MODE}" == "image" || "${MODE}" == "image-static" ]]; then
     CONTAINER_NAME="${CLOUDXR_WEB_CONTAINER_NAME:-cloudxr-web-app-newton}"
+    LEGACY_CONTAINER_NAMES="${NEWTON_CLOUDXR_LEGACY_CONTAINER_NAMES:-cloudxr-web-app-6.1.0}"
     IMAGE_CERT_DIR="${IMPORTED_WEBXR_DIR}/.newton_certs"
     IMAGE_CERT_FILE="${IMAGE_CERT_DIR}/web_client.crt"
     IMAGE_KEY_FILE="${IMAGE_CERT_DIR}/web_client.key"
@@ -273,6 +274,17 @@ server.listen(8443, '0.0.0.0', () => {
 EOF
     fi
     docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    for legacy_container in ${LEGACY_CONTAINER_NAMES}; do
+        if docker container inspect "${legacy_container}" >/dev/null 2>&1; then
+            warn "removing legacy CloudXR Web container occupying the stack lifecycle: ${legacy_container}"
+            docker rm -f "${legacy_container}" >/dev/null
+        fi
+    done
+    if ss -H -ltn 'sport = :8443' | grep -q .; then
+        err "port 8443 is already occupied after CloudXR container cleanup"
+        ss -ltnp 'sport = :8443' >&2 || true
+        exit 1
+    fi
     ok "open this in Quest: https://${HOST_IP}:8443/"
     log "48322 is only for certificate/WSS. If needed, accept: https://${HOST_IP}:48322/"
     if [[ "${MODE}" == "image-static" ]]; then
