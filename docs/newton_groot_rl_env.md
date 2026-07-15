@@ -1,372 +1,177 @@
-<!-- SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers -->
-<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+# Newton Nero + L10 Diffusion Policy 环境
 
-# Newton GR00T reinforcement-learning environment
+这套环境用于在 Newton/MJWarp 中并行执行“抓住瓶子并向上抬高 0.1 m”。瓶子的初始位置目前固定；第一版策略不使用接触力或 `qfrc_actuator`，只对齐现有 LeRobot 数据集的图像、26 维状态和 19 维绝对动作。
 
-`GrootNewtonEnv` is a headless, batched PickBottle environment for the dual
-Nero robot, right Linker L10 hand, table scene, and dynamic bottle. It loads
-`assets/generated/dual_nero_linker_l10_combined.urdf` and replicates the scene
-as independent Newton worlds inside one CUDA model.
+## 数据协议
 
-The interface follows the parts of ManiSkill that are useful to GPU robot
-learning:
+环境的 policy observation 使用与 `local_data/groot/smooth/meta/info.json` 相同的字段名：
 
-- all values retain a leading `num_envs` batch dimension;
-- `reset()` and `step()` return CUDA Torch tensors;
-- `step()` returns the Gymnasium five-tuple
-  `(obs, reward, terminated, truncated, info)`;
-- `obs_mode`, `control_mode`, and `reward_mode` select the corresponding
-  interface behavior;
-- `reset(options={"env_idx": indices})` performs a partial GPU reset;
-- `single_action_space`, `action_space`, `single_observation_space`, and
-  `observation_space` describe the unbatched and batched values when
-  Gymnasium is installed.
+| 字段 | 单帧形状 | dtype | 内容 |
+| --- | ---: | --- | --- |
+| `observation.state` | `[26]` | `float32` | `arm_joint_pos[7] + arm_eef_pos[3] + arm_eef_rot6d[6] + hand_joint_pos[10]` |
+| `observation.images.ego_view` | `[180, 320, 3]` | `uint8` | node0 ROI 后的头部 RGB |
+| `observation.images.wrist_view` | `[480, 640, 3]` | `uint8` | 腕部 RGB |
+| `action` | `[19]` | `float32` | 绝对 EEF xyz + 绝对 EEF rotation-6D + 绝对手指目标 |
 
-This is based on ManiSkill's [GPU simulation
-contract](https://maniskill.readthedocs.io/en/latest/user_guide/concepts/gpu_simulation.html),
-[observation organization](https://maniskill.readthedocs.io/en/latest/user_guide/concepts/observation.html),
-and [Gymnasium quickstart](https://maniskill.readthedocs.io/en/latest/user_guide/getting_started/quickstart.html).
-It is an API-compatible design, not a dependency on ManiSkill or SAPIEN.
+26 维 state 的严格顺序是：
 
-The bottle currently starts at the same fixed pose in every world. Scene and
-object randomization are intentionally left for a later task.
-
-## Files
-
-- `teleop_stack/envs/groot_newton_env.py`: environment, control, task reward,
-  and GPU kernels.
-- `teleop_stack/envs/groot_diffusion_policy_env.py`: observation-history and
-  action-chunk adapter.
-- `teleop_stack/envs/groot_newton_vector_env.py`: PPO auto-reset and terminal
-  transition wrapper.
-- `tools/run_newton_groot_rl_env.py`: bounded rollout and throughput runner.
-- `docker/run_groot_rl_env.sh`: headless Docker launcher.
-- `debug/import_dual_nero_linker_l10.py`: shared scene construction.
-
-## Starting the environment
-
-Run a headless rollout in the GR00T Docker image:
-
-```bash
-docker/run_groot_rl_env.sh \
-  --num-envs 8 \
-  --steps 100 \
-  --obs-mode state_dict+rgb \
-  --control-mode pd_joint_delta_pos \
-  --reward-mode normalized_dense
+```text
+[arm_joint_pos(7), eef_xyz(3), eef_rotation_6d(6), hand_joint_pos(10)]
 ```
 
-Select a host GPU with `NEWTON_GROOT_RL_GPU`. The device is exposed as
-`cuda:0` inside the container:
+19 维 action 的严格顺序是：
 
-```bash
-NEWTON_GROOT_RL_GPU=1 docker/run_groot_rl_env.sh --num-envs 8 --steps 100
+```text
+[eef_xyz_target(3), eef_rotation_6d_target(6), hand_joint_target(10)]
 ```
 
-For a state-only interface check:
+Rotation-6D 严格按数据集元数据中的 `r00,r10,r20,r01,r11,r21` 保存旋转矩阵前两列。环境内部先做 Gram-Schmidt 正交化，再用于 IK。
 
-```bash
-docker/run_groot_rl_env.sh \
-  --num-envs 2 \
-  --steps 10 \
-  --obs-mode state \
-  --no-images \
-  --no-scene-visuals \
-  --no-hydroelastic
+还要注意 state EEF 与 action EEF 的固定坐标变换。数据集 state 是 Nero/CAN 基座帧，而 action 是 node0 写入数据集的绝对命令帧：
+
+```text
+T_action = A_state_to_action · T_state_target · B_eef_offset
 ```
 
-## ManiSkill-style Python interface
+环境把 `A⁻¹ · T_action · B⁻¹` 放在 GPU 上求回 Nero/CAN 目标后再做 IK。`hold_action()` 则执行正向 `A·T·B`，因此输出与数据集 action 的数值范围和坐标语义一致。
 
-The constructor accepts either a `GrootNewtonEnvConfig` or ManiSkill-like
-keyword options:
+`env.step()` 接收的是已经反归一化的物理动作，不是 `[-1, 1]` 关节动作。DP 网络在 GPU 上使用数据集 min/max 训练；推理结束后在 GPU 上反归一化，再把 19 维绝对目标交给环境。
+
+## 图像链路
+
+现有 GR00T 推理将 `ego_view` 和 `wrist_view` 作为两个独立 video modality，并没有先拼接图像。DP 因此也使用两个不共享权重的 ResNet-18 encoder：
+
+```text
+ego_view   1280x800 dataset frame
+  -> node0 ROI: zoom=2.0, center=(0.50, 0.65)
+  -> 320x180
+  -> ego_encoder
+
+wrist_view 640x480
+  -> wrist_encoder
+```
+
+仿真相机直接用 ROI ray 生成 320×180 的 `ego_view`，所以 rollout 不再做 CPU crop/resize。训练数据通过 `teleop_stack.camera_preprocessing.preprocess_ego_rgb()` 使用与当前 GR00T simulator inference 相同的处理函数。两路 encoder 内部再在 GPU 上 resize 到网络输入尺寸。
+
+## 绝对 EEF 动作和 GPU IK
+
+默认控制模式为 `pd_eef_pose_abs`。每个控制周期执行：
+
+1. 从 19 维 action 读取绝对命令帧 EEF 9D 和绝对手指 10D 目标。
+2. 在 GPU 上执行固定 `A⁻¹·T·B⁻¹`，得到 Nero/CAN 基座帧目标。
+3. 在 CUDA Torch 上批量计算 Nero MDH FK 和 `[N, 6, 7]` 空间 Jacobian。
+4. 对所有 world 批量执行 damped least-squares。
+5. 将每周期臂关节步长限制为默认 `0.045 rad`，手指步长限制为 `0.08 rad`。
+6. 直接写入 GPU 上的 Newton joint position/velocity target。
+
+默认 IK 参数与现有 checkpoint-200000 推理控制器保持一致：位置步长 `0.03 m`、旋转步长 `5 deg`、position/orientation weight 为 `3/1`、damping 为 `0.02`。环境不对每个 world 做 `.numpy()` 或 CPU IK。
+
+旧的 `pd_joint_pos` 和 `pd_joint_delta_pos` 仍可用于兼容测试，但它们是 17 维关节动作，不属于第一版 DP 协议。
+
+## 环境接口
 
 ```python
-import torch
-
-from teleop_stack.envs import GrootNewtonEnv
-
-env = GrootNewtonEnv(
-    num_envs=64,
-    device="cuda:0",
-    obs_mode="state_dict+rgb",
-    control_mode="pd_joint_delta_pos",
-    reward_mode="normalized_dense",
-    max_episode_steps=100,
-)
-
-obs, info = env.reset(seed=0)
-action = torch.zeros((env.num_envs, 17), device="cuda:0")
-obs, reward, terminated, truncated, info = env.step(action)
-done = terminated | truncated
-
-# ManiSkill-style partial reset. torch.where remains on CUDA.
-env_idx = torch.where(done)[0]
-obs, info = env.reset(options={"env_idx": env_idx})
-env.close()
-```
-
-`step()` and `reset()` are the network-facing Torch API. `step_warp()`,
-`reset_warp()`, and `observation_warp()` expose the underlying Warp arrays for
-custom CUDA code. Torch views are created with Warp interoperability and do
-not copy observation storage.
-
-The base environment does not automatically reset completed worlds or clone a
-`final_observation`. This keeps the Diffusion Policy path lean. PPO can either
-store the terminal transition and call the partial reset shown above, or use
-the vector wrapper described below.
-
-## Action and controller interface
-
-Every action is `float32`, has shape `[num_envs, 17]`, and is normalized to
-`[-1, 1]`. This matches ManiSkill controllers and the assertion made by its
-Diffusion Policy baseline. Components are ordered as follows:
-
-1. `right_joint1` through `right_joint7`;
-2. `thumb_cmc_pitch`, `thumb_cmc_yaw`;
-3. `index_mcp_pitch`, `middle_mcp_pitch`, `ring_mcp_pitch`,
-   `pinky_mcp_pitch`;
-4. `index_mcp_roll`, `ring_mcp_roll`, `pinky_mcp_roll`;
-5. `thumb_cmc_roll`.
-
-Supported control modes are:
-
-| Mode | Meaning |
-| --- | --- |
-| `pd_joint_delta_pos` | Add normalized deltas to the current joint positions. Arm and hand deltas default to `0.1 rad` at `|action|=1`. This is the recommended Diffusion Policy and PPO mode. |
-| `pd_joint_pos` | Map `[-1, 1]` over each imported URDF joint-position limit. |
-
-Targets are clipped to the URDF limits and target velocity is set to zero.
-`hold_action_torch()` returns zero for the delta controller and the normalized
-current position for the absolute controller.
-
-One `step()` is a 10 Hz control interval by default. The action is held for
-six 60 Hz frames, each containing sixteen physics substeps, for 96 physics
-substeps per policy action.
-
-## Observation modes
-
-All observations are CUDA Torch tensors with a leading batch dimension.
-
-### `state_dict`
-
-This follows ManiSkill's `agent` and task-specific `extra` split:
-
-```text
-agent
-  qpos                 [N, 17]  float32
-  qvel                 [N, 17]  float32
-  qfrc_actuator        [N, 40]  float32
-  arm_joint_pos        [N, 7]   float32
-  hand_joint_pos       [N, 10]  float32
-extra
-  tcp_pose              [N, 7]   float32
-  obj_pose              [N, 7]   float32
-  goal_pos             [N, 3]   float32
-  tcp_to_obj_pos       [N, 3]   float32
-  obj_to_goal_pos      [N, 3]   float32
-  is_grasped           [N]      bool
-  eef_9d               [N, 9]   float32
-```
-
-`qfrc_actuator` contains the latest MuJoCo actuator generalized forces for all
-40 DOFs of the current combined URDF. It is not a direct contact force or
-contact-point wrench.
-
-### `state`
-
-Returns the compact `[N, 66]` policy state used before this ManiSkill adapter:
-
-```text
-[eef_9d (9), hand_joint_pos (10), arm_joint_pos (7), qfrc_actuator (40)]
-```
-
-### `rgb` and `state_dict+rgb`
-
-`rgb` returns real-machine-available agent state, TCP/goal data, and
-`sensor_data`. `state_dict+rgb` additionally includes the privileged bottle
-pose and relative task vectors from `state_dict`.
-
-```text
-sensor_data
-  ego_view/rgb         [N, 180, 320, 3]  uint8
-  wrist_view/rgb       [N, 480, 640, 3]  uint8
-```
-
-RGB is intentionally left as `uint8`, as in ManiSkill, to reduce observation
-memory and bandwidth. Normalize it in the network encoder.
-
-### `policy`
-
-This compact mode is convenient without a wrapper:
-
-```text
-state                    [N, 66]
-rgb/ego_view             [N, 180, 320, 3]
-rgb/wrist_view           [N, 480, 640, 3]
-```
-
-## Diffusion Policy adapter
-
-ManiSkill's official Diffusion Policy predicts a sequence shaped
-`[batch, prediction_horizon, action_dim]`, selects an action horizon, and
-calls the base environment once for each selected action. Its common defaults
-are observation horizon 2, action horizon 8, and prediction horizon 16. See
-the official [training
-code](https://github.com/mani-skill/ManiSkill/blob/main/examples/baselines/diffusion_policy/train_rgbd.py)
-and [evaluation loop](https://github.com/mani-skill/ManiSkill/blob/main/examples/baselines/diffusion_policy/diffusion_policy/evaluate.py).
-
-`GrootDiffusionPolicyEnv` implements that contract and also accepts a complete
-action chunk directly:
-
-```python
-import torch
-
-from teleop_stack.envs import GrootDiffusionPolicyEnv, GrootNewtonEnv
+from teleop_stack.envs import GrootDiffusionPolicyEnv, GrootNewtonEnv, GrootNewtonEnvConfig
 
 base_env = GrootNewtonEnv(
-    num_envs=64,
-    obs_mode="policy",
-    control_mode="pd_joint_delta_pos",
-    reward_mode="sparse",
+    GrootNewtonEnvConfig(
+        num_envs=64,
+        device="cuda:0",
+        obs_mode="policy",
+        control_mode="pd_eef_pose_abs",
+        bottle_lift_height=0.1,
+    )
 )
 env = GrootDiffusionPolicyEnv(base_env, obs_horizon=2, action_horizon=8)
 
-obs, info = env.reset()
-# obs["state"]: [64, 2, 66]
-# obs["rgb"]["ego_view"]: [64, 2, 180, 320, 3]
+observation, info = env.reset()
+# observation["observation.state"]: [64, 2, 26]
+# observation["observation.images.ego_view"]: [64, 2, 180, 320, 3]
+# observation["observation.images.wrist_view"]: [64, 2, 480, 640, 3]
 
-with torch.no_grad():
-    action_chunk = policy(obs)  # [64, T, 17], 1 <= T <= 8
-obs, reward, terminated, truncated, info = env.step(action_chunk)
+# physical_action_chunk: [64, 8, 19], CUDA float32
+observation, reward, terminated, truncated, info = env.step(physical_action_chunk)
 ```
 
-The history uses two preallocated CUDA buffers, so shifting the observation
-window does not allocate a new history tensor every step. For action chunks,
-the adapter sums rewards until each world first reports done and returns
-`info["action_chunk"]["executed_steps"]`.
+`reset(options={"env_idx": cuda_indices})` 和 `reset(world_mask=cuda_bool_mask)` 支持局部 reset。状态、reward、终止标志、图像和 history buffer 都留在 GPU。
 
-The adapter also exposes `single_action_space`, `action_space`,
-`single_observation_space`, and `observation_space`. The observation spaces
-include the state-history dimension expected by ManiSkill's Diffusion Policy
-`Agent`, while scalar image bounds avoid allocating dense CPU bound arrays.
-The two cameras remain nested because their resolutions differ; the visual
-encoder should encode each view separately and fuse the resulting features.
+基础环境 smoke test：
 
-Avoid crossing an episode boundary inside a chunk when the exact terminal
-observation is needed. PPO should use the base environment one action at a
-time; action chunks are intended for Diffusion Policy inference.
+```bash
+docker/run_groot_rl_env.sh \
+  --num-envs 64 \
+  --obs-mode policy \
+  --control-mode pd_eef_pose_abs \
+  --steps 100
+```
 
-## PickBottle reward and PPO
+关闭图像只适合检查 physics/IK 吞吐量：
 
-The reward follows ManiSkill's [PickCube
-task](https://github.com/mani-skill/ManiSkill/blob/main/mani_skill/envs/tasks/tabletop/pick_cube.py):
+```bash
+docker/run_groot_rl_env.sh --num-envs 256 --obs-mode state --no-images --steps 1000
+```
 
-1. Reaching: `1 - tanh(5 * ||tcp - bottle||)`.
-2. Grasping: add `1` when at least two distinct L10 fingers contact the
-   bottle.
-3. Placing: while grasped, add
-   `1 - tanh(5 * ||bottle - goal||)`.
-4. Static: once placed, add
-   `1 - tanh(5 * velocity_norm)`.
-5. Success: replace the dense reward with `5`.
+## 数据窗口和训练器
 
-The fixed goal is the reset bottle position plus `0.1 m` in Z. The bottle is
-placed when it is within `0.025 m` of that goal. Success additionally requires
-the controlled robot and bottle linear velocity norm to be below `0.2`.
-`is_grasped` is a cheap GPU contact-topology heuristic, not a force-closure
-proof and not a threshold on `qfrc_actuator`.
-
-Reward modes are:
-
-| Mode | Reward |
-| --- | --- |
-| `normalized_dense` | Dense reward divided by 5; recommended for PPO. |
-| `dense` | Unnormalized reward in the PickCube-style scale. |
-| `sparse` | `1` on success, otherwise `0`; useful for Diffusion Policy evaluation. |
-| `none` | Always zero. |
-
-`terminated` is success when `terminate_on_success=True`. `truncated` is the
-time limit, which defaults to 100 policy steps. The `info` dictionary includes
-`success`, `fail`, `is_grasped`, `is_obj_placed`, `is_robot_static`, reward
-components, and episode return/length/success metrics.
-
-ManiSkill's PPO baseline uses normalized dense rewards, batched CUDA rollout
-buffers, partial resets, and bootstraps time-limit truncations from the final
-observation. See the official [PPO
-implementation](https://github.com/mani-skill/ManiSkill/blob/main/examples/baselines/ppo/ppo.py)
-and [baseline guide](https://maniskill.readthedocs.io/en/latest/user_guide/reinforcement_learning/baselines.html).
-
-For this environment, a PPO runner should use `obs_mode="state"` for the
-fastest baseline or an image encoder with `obs_mode="policy"`, store rollout
-tensors on CUDA, distinguish `terminated` from `truncated` during bootstrap,
-and partial-reset completed world indices after saving their terminal values.
-
-`GrootNewtonVectorEnv` provides the subset of ManiSkill's vector wrapper used
-by its PPO code:
+`GrootLeRobotWindowDataset` 直接读取现有 Parquet 和 MP4：
 
 ```python
-import torch
+from teleop_stack.datasets import GrootLeRobotWindowDataset
 
-from teleop_stack.envs import GrootNewtonEnv, GrootNewtonVectorEnv
-
-base_env = GrootNewtonEnv(
-    num_envs=512,
-    obs_mode="state",
-    control_mode="pd_joint_delta_pos",
-    reward_mode="normalized_dense",
+dataset = GrootLeRobotWindowDataset(
+    "local_data/groot/smooth",
+    obs_horizon=2,
+    pred_horizon=16,
 )
-env = GrootNewtonVectorEnv(
-    base_env,
-    auto_reset=True,
-    ignore_terminations=False,
-    record_metrics=True,
-)
-
-obs, info = env.reset(seed=0)
-action = torch.zeros((env.num_envs, 17), device="cuda:0")
-obs, reward, terminated, truncated, info = env.step(action)
-
-# These keys match the official PPO rollout expectations.
-done_mask = info["_final_info"]
-final_obs = info["final_observation"]
-episode_metrics = info["final_info"]["episode"]
+sample = dataset[0]
 ```
 
-The wrapper clones the small reward/done arrays before reset and lazily
-allocates one terminal-observation buffer. For image PPO this buffer is large;
-use the base environment with explicit partial resets if the trainer already
-owns terminal image storage.
+窗口语义为：
 
-## GPU and CPU boundary
+- observation：当前帧以及前一帧，episode 起点使用第一帧 padding；
+- action：从当前帧开始的未来 16 个绝对动作，episode 末尾使用最后动作 padding；
+- `action_is_pad`：使 diffusion loss 忽略末尾 padding；
+- 数值数据：启动时读取全部 6,767 帧，体积很小；
+- 视频：保持 H.264 压缩，由 DataLoader worker 解码，并通过 pinned memory/non-blocking copy 送入 GPU。
 
-Steady-state numerical work remains on CUDA:
+启动离线 DP 行为克隆：
 
-- Newton collision and hydroelastic contact generation;
-- MJWarp dynamics and `qfrc_actuator`;
-- normalized action decoding and PD target writes;
-- state/TCP/bottle extraction, multi-finger contact classification, reward,
-  success, and episode metrics;
-- partial reset, BVH updates, tiled camera ray tracing, and RGB unpacking;
-- Diffusion Policy observation-history buffers and action chunks.
+```bash
+conda_envs/newton/bin/python tools/train_newton_groot_diffusion_policy.py \
+  --dataset local_data/groot/smooth \
+  --output-dir checkpoints/dp/groot_l10_pick \
+  --batch-size 32 \
+  --num-workers 4 \
+  --steps 100000
+```
 
-There is still light CPU scheduling for Python, CUDA launches, the six-frame
-control loop, and dictionary construction. Startup also performs URDF/GLB/JSON
-parsing, MuJoCo model compilation, Warp JIT, and small metadata reads on the
-CPU. Neither `step()` nor `reset()` calls `.numpy()` or copies observations to
-host memory.
+网络包含两个独立 camera encoder、一个 26 维 state encoder 和一个预测 16×19 action noise 的 temporal denoiser。训练、归一化、augmentation 后的 resize、noise scheduler 和 loss 都在 GPU。
 
-The standalone runner calls `wp.synchronize_device()` before and after its
-timed loop. These runner-only synchronizations are not part of the environment
-API. Training code should avoid `.numpy()`, `.cpu()`, per-step synchronization,
-and image logging.
+运行 checkpoint：
 
-At the default resolutions, packed and RGB camera buffers use roughly
-2.44 MiB per world before ray-tracer workspace and physics state.
-`mujoco_njmax`, `mujoco_nconmax`, `rigid_contacts_per_env`, image resolution,
-and Diffusion Policy observation horizon all affect capacity. The `state` and
-`state_dict` modes skip visual asset loading, camera allocation, and ray
-tracing. In image observation modes, `--no-images` skips sensor creation and
-ray tracing but retains zero-filled RGB buffers so the schema remains stable.
+```bash
+conda_envs/newton/bin/python tools/run_newton_groot_dp.py \
+  checkpoints/dp/groot_l10_pick/checkpoint_00100000.pt \
+  --num-envs 32 \
+  --action-horizon 8
+```
 
-The environment does not write rollout, image, contact, or policy logs to
-disk.
+## CPU/GPU 边界
+
+| 路径 | 位置 | 原因 |
+| --- | --- | --- |
+| URDF/GLB/JSON/Parquet metadata 加载 | CPU，初始化阶段 | 文件 I/O 和场景构建 |
+| H.264 MP4 解码 | CPU DataLoader worker | 当前依赖中没有 NVDEC/DALI 解码链路 |
+| pinned batch 到 CUDA | 异步传输 | `non_blocking=True` |
+| DP encoder、归一化、denoiser、loss | GPU | 训练主路径 |
+| Newton physics、camera render、reward、reset | GPU | batched Warp/MJWarp |
+| EEF FK/Jacobian/DLS IK | GPU | batched Torch |
+| qfrc/log/export | 不启用 | 第一版协议明确排除 |
+
+不能把 H.264 解码宣称为“全 GPU”。若视频输入成为训练瓶颈，下一步应增加一次性预处理的 mmap frame cache，或接入 NVDEC/DALI；不建议把全部原始视频长期常驻显存。当前数据预处理后约数 GB，放主机内存/本地 NVMe 更合理，GPU 只保留正在训练的 batch。
+
+## 当前可训练范围
+
+现有 trainer 是标准离线 Diffusion Policy behavior cloning，可以用 20 个成功 demo 训练一个比 GR00T 小得多的初始化策略，并直接接入 Newton rollout。它还不是奖励驱动的在线 RL 算法。
+
+要进行真正的在线 RL 微调，还需要明确选择 DPPO、Diffusion-QL 或“GR00T/成功 rollout 写入 replay 后继续 diffusion BC”的路线，并补齐 replay buffer、advantage/Q loss、策略版本与评估循环。环境、19 维动作、26 维 state、双相机 observation history 和 GPU action-chunk 接口已经为这些训练器准备好；第一版应先验证离线 DP 能稳定完成抬瓶，再增加在线 RL，避免同时排查视觉域差异、IK 和 RL 优化三个问题。

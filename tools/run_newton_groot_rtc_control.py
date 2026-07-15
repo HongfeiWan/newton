@@ -14,23 +14,21 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
+import math
+import os
+import sys
+import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from importlib import metadata
-import json
-import math
-import os
 from pathlib import Path
-import sys
-import time
 from typing import Any
 
-import cv2
 import numpy as np
 import warp as wp
-
 
 os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
 
@@ -40,6 +38,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import newton.examples  # noqa: E402
 from debug import import_dual_nero_linker_l10 as scene_runtime  # noqa: E402
+from teleop_stack.camera_preprocessing import preprocess_ego_rgb  # noqa: E402
 from teleop_stack.ik import (  # noqa: E402
     FullPoseDifferentialIkController,
     FullPoseDifferentialIkControllerConfig,
@@ -52,10 +51,7 @@ from teleop_stack.retargeting.hand_config import load_linker_l10_right_hand_spec
 from teleop_stack.robots.newton_runtime import NewtonLinkKinematicsModel  # noqa: E402
 from teleop_stack.teleop.spatial_frames import matrix_to_quat_xyzw, quat_xyzw_to_matrix  # noqa: E402
 
-
-DEFAULT_ISAAC_GROOT_ROOT = Path(
-    os.environ.get("ISAAC_GROOT_ROOT", REPO_ROOT.parent / "Isaac-GR00T")
-)
+DEFAULT_ISAAC_GROOT_ROOT = Path(os.environ.get("ISAAC_GROOT_ROOT", REPO_ROOT.parent / "Isaac-GR00T"))
 DEFAULT_POLICY_CHECKPOINT = REPO_ROOT / "checkpoints" / "groot" / "checkpoint-200000"
 DEFAULT_VLM_MODEL = REPO_ROOT / "checkpoints" / "nvidia" / "Cosmos-Reason2-2B"
 DEFAULT_SMOOTH_DIR = REPO_ROOT / "local_data" / "groot" / "smooth"
@@ -111,6 +107,7 @@ def _resize_rgb_nearest(
     source_y = min((y * source_height) // target_height, source_height - 1)
     source_x = min((x * source_width) // target_width, source_width - 1)
     target[y, x, channel] = source[source_y, source_x, channel]
+
 
 POLICY_HAND_JOINT_NAMES = (
     "thumb_cmc_pitch",
@@ -357,25 +354,13 @@ def _node0_ego_view_preprocess(
     center_y: float,
 ) -> np.ndarray:
     """Apply node0's camera ROI and frame-tap resize without changing RGB order."""
-    source = np.asarray(image, dtype=np.uint8)
-    if source.ndim != 3 or source.shape[2] != 3:
-        raise ValueError(f"ego_view source must be RGB HWC, got {source.shape}")
-    source_height, source_width, _ = source.shape
-    crop_x, crop_y, crop_width, crop_height = scene_runtime._roi_crop_rect(  # noqa: SLF001
-        source_width,
-        source_height,
+    return preprocess_ego_rgb(
+        image,
         zoom=float(zoom),
         center_x=float(center_x),
         center_y=float(center_y),
+        output_size=(NODE0_EGO_INPUT_WIDTH, NODE0_EGO_INPUT_HEIGHT),
     )
-    cropped = source[crop_y : crop_y + crop_height, crop_x : crop_x + crop_width]
-    zoomed = cv2.resize(cropped, (source_width, source_height), interpolation=cv2.INTER_LINEAR)
-    output = cv2.resize(
-        zoomed,
-        (NODE0_EGO_INPUT_WIDTH, NODE0_EGO_INPUT_HEIGHT),
-        interpolation=cv2.INTER_AREA,
-    )
-    return np.ascontiguousarray(output, dtype=np.uint8)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -627,8 +612,7 @@ def _require_finite_values(
     bad_indices = np.flatnonzero(~finite.reshape(-1))[:8]
     bad_values = [float(flat[index]) for index in bad_indices]
     raise error_type(
-        f"{name} contains non-finite values at flat indices "
-        f"{bad_indices.astype(int).tolist()}: {bad_values}"
+        f"{name} contains non-finite values at flat indices {bad_indices.astype(int).tolist()}: {bad_values}"
     )
 
 
@@ -789,11 +773,7 @@ class TeleopRtcSeedManager:
             {
                 "start_step": self._time_to_step(start_s),
                 "frame_id": int(frame_id),
-                "action": {
-                    key: _first_batch_chunk(action, key)
-                    for key in self.action_keys
-                    if key in action
-                },
+                "action": {key: _first_batch_chunk(action, key) for key in self.action_keys if key in action},
             }
         )
         if len(self._chunks) > self.max_chunks:
@@ -830,14 +810,18 @@ class TeleopRtcSeedManager:
             for key in self.action_keys
             if key in rows[0]
         }
-        return seed, float(anchor_start_s), {
-            "reason": "ok",
-            "anchor_frame_id": int(anchor_frame_id),
-            "start_action_step": int(start_step),
-            "seed_steps": len(rows),
-            "seed_valid_steps": valid_steps,
-            "seed_padded_steps": len(rows) - valid_steps,
-        }
+        return (
+            seed,
+            float(anchor_start_s),
+            {
+                "reason": "ok",
+                "anchor_frame_id": int(anchor_frame_id),
+                "start_action_step": int(start_step),
+                "seed_steps": len(rows),
+                "seed_valid_steps": valid_steps,
+                "seed_padded_steps": len(rows) - valid_steps,
+            },
+        )
 
 
 def _rtc_options(
@@ -963,9 +947,7 @@ def _initial_actions_with_rtc(
         ramp = torch.linspace(0.0, 1.0, intermediate_steps + 2, device=device)
         ramp = 1.0 - torch.exp(-float(options["rtc_ramp_rate"]) * ramp)
         ramp = ramp / ramp[-1].clamp_min(1.0e-8)
-        velocity_strength[:, frozen_steps:overlap_steps, :] = ramp[1:-1][None, :, None].to(
-            dtype=dtype, device=device
-        )
+        velocity_strength[:, frozen_steps:overlap_steps, :] = ramp[1:-1][None, :, None].to(dtype=dtype, device=device)
     return actions, velocity_strength
 
 
@@ -1061,14 +1043,13 @@ class GrootRtcPolicy:
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
 
-        import torch
-        from transformers import AutoConfig, AutoModel, AutoProcessor
-
         import gr00t.model  # noqa: F401
+        import torch
         from gr00t.data.embodiment_tags import EmbodimentTag
         from gr00t.data.types import MessageType, VLAStepData
         from gr00t.policy.gr00t_policy import Gr00tPolicy
         from gr00t.policy.policy import BasePolicy
+        from transformers import AutoConfig, AutoModel, AutoProcessor
 
         BasePolicy.__init__(self, strict=strict)
         self._torch = torch
@@ -1097,9 +1078,7 @@ class GrootRtcPolicy:
         self.processor.eval()
         all_configs = self.processor.get_modality_configs()
         self.modality_configs = {
-            key: value
-            for key, value in all_configs[self.embodiment_tag.value].items()
-            if key != "rl_info"
+            key: value for key, value in all_configs[self.embodiment_tag.value].items() if key != "rl_info"
         }
         self.language_key = self.modality_configs["language"].modality_keys[0]
         self.collate_fn = self.processor.collator
@@ -1239,9 +1218,7 @@ class SmoothEpisodeSource:
 
     def video_observation(self, frame_index: int, spec: ModalitySpec) -> dict[str, np.ndarray]:
         return {
-            key: np.stack([self._read_rgb(key, frame_index + delta) for delta in spec.delta_indices], axis=0)[
-                None, ...
-            ]
+            key: np.stack([self._read_rgb(key, frame_index + delta) for delta in spec.delta_indices], axis=0)[None, ...]
             for key in spec.keys
         }
 
@@ -1361,8 +1338,8 @@ class NewtonPolicyController:
             finite_difference_rad=float(ik_finite_difference_rad),
         )
         newton_world_from_base = self._body_pose_matrix("/right_base_link")
-        self._genesis_to_world_transform = (
-            newton_world_from_base @ _invert_rigid_transform(self._state_to_genesis_transform)
+        self._genesis_to_world_transform = newton_world_from_base @ _invert_rigid_transform(
+            self._state_to_genesis_transform
         )
         initial_q = tuple(float(value) for value in self.arm_q())
         lower_limits = tuple(float(self._joint_limit_lower[index]) for index in self.arm_qd_indices)
@@ -1525,9 +1502,7 @@ class NewtonPolicyController:
                 "mapped_world_xyz": mapped_world_pose[:3, 3].copy(),
                 "current_world_xyz": current_world_pose[:3, 3].copy(),
                 "initial_residual_xyz": residual.copy(),
-                "state_to_genesis_translation": np.asarray(
-                    NODE0_STATE_TO_GENESIS_TRANSLATION_XYZ, dtype=np.float64
-                ),
+                "state_to_genesis_translation": np.asarray(NODE0_STATE_TO_GENESIS_TRANSLATION_XYZ, dtype=np.float64),
                 "state_to_genesis_rot6d": _rotmat_to_rot6d(self._state_to_genesis_transform[:3, :3]),
                 "eef_offset_translation": np.asarray(
                     NODE0_STATE_TO_GENESIS_EEF_OFFSET_TRANSLATION_XYZ, dtype=np.float64
@@ -1624,9 +1599,7 @@ class NewtonPolicyController:
     def state_groups(self) -> dict[str, np.ndarray]:
         arm_q = self.arm_q()
         eef_pose = nero_can_flange_pose_from_joints(arm_q)
-        eef_9d = np.concatenate(
-            [np.asarray(eef_pose[:3, 3], dtype=np.float32), _rotmat_to_rot6d(eef_pose[:3, :3])]
-        )
+        eef_9d = np.concatenate([np.asarray(eef_pose[:3, 3], dtype=np.float32), _rotmat_to_rot6d(eef_pose[:3, :3])])
         return {
             "eef_9d": eef_9d.astype(np.float32),
             "hand_joint_pos": _reported_hand_q_from_command(self.hand_command_q()),
@@ -1921,10 +1894,7 @@ class GrootRtcExample(scene_runtime.Example):
 
     def _sim_state_observation(self) -> dict[str, np.ndarray]:
         source = self.controller.state_groups()
-        return {
-            key: np.asarray(source[key], dtype=np.float32)[None, None, ...]
-            for key in self.modalities.state.keys
-        }
+        return {key: np.asarray(source[key], dtype=np.float32)[None, None, ...] for key in self.modalities.state.keys}
 
     def _build_observation(self) -> tuple[dict[str, Any], dict[str, Any]]:
         smooth_frame = int(self.groot_args.smooth_frame_offset) + self.policy_step

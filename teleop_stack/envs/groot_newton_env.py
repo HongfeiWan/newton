@@ -23,6 +23,8 @@ import newton
 from debug import import_dual_nero_linker_l10 as scene_runtime
 from newton.sensors import SensorTiledCamera
 from newton.viewer import ViewerNull
+from teleop_stack.models import NamedJointValues
+from teleop_stack.retargeting.hand_config import load_linker_l10_right_hand_spec
 
 ARM_JOINT_NAMES = tuple(f"right_joint{index}" for index in range(1, 8))
 HAND_JOINT_NAMES = (
@@ -37,14 +39,18 @@ HAND_JOINT_NAMES = (
     "pinky_mcp_roll",
     "thumb_cmc_roll",
 )
-ACTION_SIZE = len(ARM_JOINT_NAMES) + len(HAND_JOINT_NAMES)
-POLICY_PROPRIO_SIZE = 9 + len(HAND_JOINT_NAMES) + len(ARM_JOINT_NAMES)
+JOINT_ACTION_SIZE = len(ARM_JOINT_NAMES) + len(HAND_JOINT_NAMES)
+STATE_SIZE = len(ARM_JOINT_NAMES) + 9 + len(HAND_JOINT_NAMES)
+ACTION_SIZE = 9 + len(HAND_JOINT_NAMES)
+POLICY_PROPRIO_SIZE = STATE_SIZE
 
 _CONTROL_MODE_PD_JOINT_POS = 0
 _CONTROL_MODE_PD_JOINT_DELTA_POS = 1
+_CONTROL_MODE_PD_EEF_POSE_ABS = 2
 _CONTROL_MODE_IDS = {
     "pd_joint_pos": _CONTROL_MODE_PD_JOINT_POS,
     "pd_joint_delta_pos": _CONTROL_MODE_PD_JOINT_DELTA_POS,
+    "pd_eef_pose_abs": _CONTROL_MODE_PD_EEF_POSE_ABS,
 }
 
 _REWARD_MODE_NONE = 0
@@ -87,6 +93,18 @@ _HAND_SDK_LIMITS = (
 )
 _HAND_RAW_REVERSED = (True, True, True, True, True, True, False, False, False, True)
 _HAND_OBSERVATION_LOWER = (0.0, 0.0, 0.0053360784, 0.0053360784, 0.0053360784, 0.0053360784, 0.0, 0.0, 0.0, 0.0)
+_GROOT_INITIAL_HAND_Q = (
+    0.1848468184,
+    0.3151794076,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0581703521,
+    0.0262242742,
+    0.1140341759,
+    0.0,
+)
 
 _NERO_MDH = (
     (0.138, 0.0, 0.0, 0.0),
@@ -97,6 +115,13 @@ _NERO_MDH = (
     (0.0, 0.0, math.pi / 2.0, math.pi / 2.0),
     (0.0235, 0.0, math.pi / 2.0, 0.0),
 )
+
+# Existing data records state in the Nero/CAN frame and absolute EEF actions
+# after node0's fixed A * T * B command transform.
+_STATE_TO_ACTION_ROTATION = ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
+_STATE_TO_ACTION_TRANSLATION = (0.0, 0.059, 0.918)
+_ACTION_EEF_OFFSET_ROTATION = ((0.0, 0.0, 1.0), (-1.0, 0.0, 0.0), (0.0, -1.0, 0.0))
+_ACTION_EEF_OFFSET_TRANSLATION = (0.032, 0.0, -0.0235)
 
 
 @dataclass(frozen=True)
@@ -114,12 +139,21 @@ class GrootNewtonEnvConfig:
     substeps_per_frame: int = 16
     max_episode_steps: int = 100
     obs_mode: str = "state_dict+rgb"
-    control_mode: str = "pd_joint_delta_pos"
+    control_mode: str = "pd_eef_pose_abs"
     reward_mode: str = "normalized_dense"
     arm_action_delta: float = 0.1
     hand_action_delta: float = 0.1
+    ik_iterations: int = 4
+    ik_damping_lambda: float = 0.02
+    ik_position_weight: float = 3.0
+    ik_orientation_weight: float = 1.0
+    ik_max_task_step_m: float = 0.03
+    ik_max_rotation_step_rad: float = math.radians(5.0)
+    ik_max_joint_step_rad: float = 0.045
+    hand_max_joint_step_rad: float = 0.08
+    initial_hand_q: tuple[float, ...] = _GROOT_INITIAL_HAND_Q
     bottle_lift_height: float = 0.1
-    goal_threshold: float = 0.025
+    goal_threshold: float = 0.005
     static_velocity_threshold: float = 0.2
     grasp_finger_count: int = 2
     terminate_on_success: bool = True
@@ -159,6 +193,20 @@ class GrootNewtonEnvConfig:
             )
         if self.arm_action_delta <= 0.0 or self.hand_action_delta <= 0.0:
             raise ValueError("action deltas must be positive")
+        if self.ik_iterations < 1:
+            raise ValueError("ik_iterations must be positive")
+        if self.ik_damping_lambda <= 0.0:
+            raise ValueError("ik_damping_lambda must be positive")
+        if self.ik_position_weight <= 0.0 or self.ik_orientation_weight <= 0.0:
+            raise ValueError("IK task weights must be positive")
+        if min(self.ik_max_task_step_m, self.ik_max_rotation_step_rad, self.ik_max_joint_step_rad) <= 0.0:
+            raise ValueError("IK step limits must be positive")
+        if self.hand_max_joint_step_rad <= 0.0:
+            raise ValueError("hand_max_joint_step_rad must be positive")
+        if len(self.initial_hand_q) != len(HAND_JOINT_NAMES) or not all(
+            math.isfinite(value) for value in self.initial_hand_q
+        ):
+            raise ValueError(f"initial_hand_q must contain {len(HAND_JOINT_NAMES)} finite values")
         if self.bottle_lift_height <= 0.0 or self.goal_threshold <= 0.0:
             raise ValueError("bottle_lift_height and goal_threshold must be positive")
         if self.static_velocity_threshold <= 0.0:
@@ -251,7 +299,6 @@ def _gather_joint_position_action(
 def _extract_state(
     joint_q: wp.array[wp.float32],
     joint_qd: wp.array[wp.float32],
-    qfrc_actuator: wp.array[wp.float32],
     joint_coord_world_start: wp.array[wp.int32],
     joint_dof_world_start: wp.array[wp.int32],
     arm_local_q_indices: wp.array[wp.int32],
@@ -269,7 +316,6 @@ def _extract_state(
     qpos_out: wp.array2d[wp.float32],
     qvel_out: wp.array2d[wp.float32],
     policy_state_out: wp.array2d[wp.float32],
-    dofs_per_world: wp.int32,
 ):
     world = wp.tid()
     q_start = joint_coord_world_start[world]
@@ -282,6 +328,7 @@ def _extract_state(
         arm_out[world, joint] = q
         qpos_out[world, joint] = q
         qvel_out[world, joint] = joint_qd[qd_start + arm_local_qd_indices[joint]]
+        policy_state_out[world, joint] = q
         d_i = mdh[joint, 0]
         a_i = mdh[joint, 1]
         alpha_i = mdh[joint, 2]
@@ -299,13 +346,13 @@ def _extract_state(
     eef_out[world, 1] = position[1]
     eef_out[world, 2] = position[2]
     eef_out[world, 3] = rotation[0, 0]
-    eef_out[world, 4] = rotation[0, 1]
-    eef_out[world, 5] = rotation[0, 2]
-    eef_out[world, 6] = rotation[1, 0]
+    eef_out[world, 4] = rotation[1, 0]
+    eef_out[world, 5] = rotation[2, 0]
+    eef_out[world, 6] = rotation[0, 1]
     eef_out[world, 7] = rotation[1, 1]
-    eef_out[world, 8] = rotation[1, 2]
+    eef_out[world, 8] = rotation[2, 1]
     for index in range(9):
-        policy_state_out[world, index] = eef_out[world, index]
+        policy_state_out[world, 7 + index] = eef_out[world, index]
 
     for joint in range(10):
         command = joint_q[q_start + hand_local_q_indices[joint]]
@@ -320,12 +367,7 @@ def _extract_state(
         )
         qpos_out[world, 7 + joint] = hand_out[world, joint]
         qvel_out[world, 7 + joint] = joint_qd[qd_start + hand_local_qd_indices[joint]]
-        policy_state_out[world, 9 + joint] = hand_out[world, joint]
-
-    for joint in range(7):
-        policy_state_out[world, 19 + joint] = arm_out[world, joint]
-    for dof in range(dofs_per_world):
-        policy_state_out[world, POLICY_PROPRIO_SIZE + dof] = qfrc_actuator[qd_start + dof]
+        policy_state_out[world, 16 + joint] = hand_out[world, joint]
 
 
 @wp.kernel(enable_backward=False)
@@ -456,11 +498,12 @@ def _evaluate_pick_bottle(
         if finger_contacts[world, finger] > 0:
             touching_fingers = touching_fingers + 1
     grasped = touching_fingers >= grasp_finger_count
-    placed = wp.length(goal_delta) <= goal_threshold
+    lift_remaining = wp.max(goal_pos[world, 2] - bottle_position[2], 0.0)
+    lifted = lift_remaining <= goal_threshold
 
     velocity_sq = float(0.0)
     qd_start = joint_dof_world_start[world]
-    for joint in range(ACTION_SIZE):
+    for joint in range(JOINT_ACTION_SIZE):
         velocity = joint_qd[qd_start + action_local_qd[joint]]
         velocity_sq = velocity_sq + velocity * velocity
     bottle_linear_velocity = wp.spatial_top(body_qd[body_start + bottle_local_body])
@@ -468,11 +511,11 @@ def _evaluate_pick_bottle(
     static = wp.sqrt(velocity_sq) <= static_velocity_threshold
 
     is_grasped[world] = grasped
-    is_obj_placed[world] = placed
+    is_obj_placed[world] = lifted
     is_robot_static[world] = static
-    success[world] = placed and static
+    success[world] = lifted
     reaching_reward[world] = 1.0 - wp.tanh(5.0 * wp.length(tcp_delta))
-    place_reward[world] = 1.0 - wp.tanh(5.0 * wp.length(goal_delta))
+    place_reward[world] = 1.0 - wp.tanh(10.0 * lift_remaining)
     static_reward[world] = 1.0 - wp.tanh(5.0 * wp.sqrt(velocity_sq))
 
 
@@ -613,18 +656,6 @@ def _reset_control_targets(
 
 
 @wp.kernel(enable_backward=False)
-def _clear_reset_qfrc(
-    world_mask: wp.array[wp.bool],
-    qfrc: wp.array[wp.float32],
-    joint_dof_world_start: wp.array[wp.int32],
-    dofs_per_world: wp.int32,
-):
-    world, dof = wp.tid()
-    if (not world_mask or world_mask[world]) and dof < dofs_per_world:
-        qfrc[joint_dof_world_start[world] + dof] = 0.0
-
-
-@wp.kernel(enable_backward=False)
 def _mark_world_indices(indices: wp.array[wp.int32], num_worlds: wp.int32, world_mask: wp.array[wp.bool]):
     index = indices[wp.tid()]
     if index >= 0 and index < num_worlds:
@@ -634,10 +665,9 @@ def _mark_world_indices(indices: wp.array[wp.int32], num_worlds: wp.int32, world
 class GrootNewtonEnv:
     """Batched, headless RL environment with GPU-resident observations.
 
-    Actions have shape ``[num_envs, 17]`` in the order
-    ``right_joint1..7`` followed by :data:`HAND_JOINT_NAMES`. Values are
-    normalized to ``[-1, 1]``, decoded by the configured controller, and
-    clipped to the imported URDF limits.
+    The default action has shape ``[num_envs, 19]`` and follows the dataset
+    order ``absolute EEF xyz + rotation 6D + absolute L10 targets``. Batched
+    damped-least-squares IK and joint target writes stay on the GPU.
     """
 
     metadata: ClassVar[dict[str, list[str]]] = {"render_modes": []}
@@ -647,7 +677,9 @@ class GrootNewtonEnv:
         self.num_envs = self.config.num_envs
         self.device = wp.get_device(self.config.device)
         self.frames_per_action = self.config.simulation_hz // self.config.control_hz
+        self.control_dt = 1.0 / float(self.config.control_hz)
         self.control_mode = self.config.control_mode
+        self.action_size = ACTION_SIZE if self.control_mode == "pd_eef_pose_abs" else JOINT_ACTION_SIZE
         self.obs_mode = self.config.obs_mode
         self.reward_mode = self.config.reward_mode
         self.render_mode = None
@@ -665,7 +697,7 @@ class GrootNewtonEnv:
         args.capture_graph = self.config.capture_graph
         args.world_count = self.num_envs
         args.replicate_worlds = True
-        args.request_qfrc_actuator = True
+        args.request_qfrc_actuator = False
         args.gpu_env_mode = True
         args.quest_teleop = False
         args.d455_preview = False
@@ -712,6 +744,8 @@ class GrootNewtonEnv:
         self.coords_per_world = self.model.joint_coord_count // self.num_envs
         self.dofs_per_world = self.model.joint_dof_count // self.num_envs
         self._setup_joint_indices()
+        self._initialize_hand_pose()
+        self._setup_gpu_ik()
         self._setup_task_indices()
         self._setup_observation_arrays()
         self._setup_episode_arrays()
@@ -755,6 +789,10 @@ class GrootNewtonEnv:
         arm_q, arm_qd = find_local_indices(ARM_JOINT_NAMES)
         hand_labels = tuple(f"right_l10_{name}" for name in HAND_JOINT_NAMES)
         hand_q, hand_qd = find_local_indices(hand_labels)
+        self._arm_local_q_np = arm_q
+        self._arm_local_qd_np = arm_qd
+        self._hand_local_q_np = hand_q
+        self._hand_local_qd_np = hand_qd
         self._arm_local_q = wp.array(arm_q, dtype=wp.int32, device=self.device)
         self._arm_local_qd = wp.array(arm_qd, dtype=wp.int32, device=self.device)
         self._hand_local_q = wp.array(hand_q, dtype=wp.int32, device=self.device)
@@ -768,6 +806,231 @@ class GrootNewtonEnv:
             )
         )
         self._action_scale = wp.array(action_scale, dtype=wp.float32, device=self.device)
+
+    def _initialize_hand_pose(self) -> None:
+        """Match every replicated hand to the first-frame GR00T posture."""
+        expanded = load_linker_l10_right_hand_spec().expand_mimic_joint_values(
+            NamedJointValues(
+                joint_names=HAND_JOINT_NAMES,
+                joint_positions=tuple(float(value) for value in self.config.initial_hand_q),
+            )
+        )
+        joint_q = self.state_0.joint_q.numpy().copy()
+        joint_target_q = self.control.joint_target_q.numpy().copy()
+        joint_world_start = self.model.joint_world_start.numpy()
+        joint_q_start = self.model.joint_q_start.numpy()
+        for world in range(self.num_envs):
+            first_joint = int(joint_world_start[world])
+            last_joint = int(joint_world_start[world + 1])
+            for name, value in zip(expanded.joint_names, expanded.joint_positions, strict=True):
+                suffix = f"/right_l10_{name}"
+                matches = [
+                    joint
+                    for joint in range(first_joint, last_joint)
+                    if self.model.joint_label[joint] == suffix[1:] or self.model.joint_label[joint].endswith(suffix)
+                ]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f"Expected one replicated hand joint {name!r} in world {world}, got {len(matches)}"
+                    )
+                q_index = int(joint_q_start[matches[0]])
+                joint_q[q_index] = float(value)
+                joint_target_q[q_index] = float(value)
+
+        joint_q_wp = wp.array(joint_q, dtype=wp.float32, device=self.device)
+        joint_target_q_wp = wp.array(joint_target_q, dtype=wp.float32, device=self.device)
+        wp.copy(self.model.joint_q, joint_q_wp)
+        wp.copy(self.model.joint_target_q, joint_target_q_wp)
+        wp.copy(self.state_0.joint_q, joint_q_wp)
+        wp.copy(self.control.joint_target_q, joint_target_q_wp)
+        newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
+        wp.copy(self.model.body_q, self.state_0.body_q)
+        self.state_1.assign(self.state_0)
+        if hasattr(self._scene, "_initial_joint_q"):
+            self._scene._initial_joint_q = joint_q.copy()
+        if hasattr(self._scene, "_initial_joint_target_q"):
+            self._scene._initial_joint_target_q = joint_target_q.copy()
+        if hasattr(self._scene, "_initial_body_q"):
+            self._scene._initial_body_q = self.state_0.body_q.numpy().copy()
+        if hasattr(self._scene, "_initial_model_body_q"):
+            self._scene._initial_model_body_q = self.model.body_q.numpy().copy()
+
+    def _setup_gpu_ik(self) -> None:
+        """Create fixed CUDA index and limit tensors used by batched EEF IK."""
+        if self.control_mode != "pd_eef_pose_abs":
+            return
+        try:
+            import torch
+        except ImportError as exc:
+            raise ImportError("pd_eef_pose_abs requires PyTorch for batched CUDA IK") from exc
+
+        q_starts = self.model.joint_coord_world_start.numpy().astype(np.int64, copy=False)[: self.num_envs]
+        qd_starts = self.model.joint_dof_world_start.numpy().astype(np.int64, copy=False)[: self.num_envs]
+        arm_q = q_starts[:, None] + self._arm_local_q_np[None, :]
+        arm_qd = qd_starts[:, None] + self._arm_local_qd_np[None, :]
+        hand_q = q_starts[:, None] + self._hand_local_q_np[None, :]
+        hand_qd = qd_starts[:, None] + self._hand_local_qd_np[None, :]
+        torch_device = str(self.device)
+        self._arm_q_indices_torch = torch.as_tensor(arm_q, dtype=torch.long, device=torch_device)
+        self._arm_qd_indices_torch = torch.as_tensor(arm_qd, dtype=torch.long, device=torch_device)
+        self._hand_q_indices_torch = torch.as_tensor(hand_q, dtype=torch.long, device=torch_device)
+        self._hand_qd_indices_torch = torch.as_tensor(hand_qd, dtype=torch.long, device=torch_device)
+
+        lower = self.model.joint_limit_lower.numpy()
+        upper = self.model.joint_limit_upper.numpy()
+        self._arm_lower_torch = torch.as_tensor(lower[arm_qd], dtype=torch.float32, device=torch_device)
+        self._arm_upper_torch = torch.as_tensor(upper[arm_qd], dtype=torch.float32, device=torch_device)
+        hand_lower = np.maximum(lower[hand_qd], np.asarray(_HAND_COMMAND_LIMITS, dtype=np.float32)[None, :, 0])
+        hand_upper = np.minimum(upper[hand_qd], np.asarray(_HAND_COMMAND_LIMITS, dtype=np.float32)[None, :, 1])
+        self._hand_lower_torch = torch.as_tensor(hand_lower, dtype=torch.float32, device=torch_device)
+        self._hand_upper_torch = torch.as_tensor(hand_upper, dtype=torch.float32, device=torch_device)
+        self._ik_identity_torch = torch.eye(7, dtype=torch.float32, device=torch_device).expand(self.num_envs, -1, -1)
+        self._state_to_action_rotation_torch = torch.as_tensor(
+            _STATE_TO_ACTION_ROTATION, dtype=torch.float32, device=torch_device
+        ).expand(self.num_envs, -1, -1)
+        self._state_to_action_translation_torch = torch.as_tensor(
+            _STATE_TO_ACTION_TRANSLATION, dtype=torch.float32, device=torch_device
+        ).expand(self.num_envs, -1)
+        self._action_eef_offset_rotation_torch = torch.as_tensor(
+            _ACTION_EEF_OFFSET_ROTATION, dtype=torch.float32, device=torch_device
+        ).expand(self.num_envs, -1, -1)
+        self._action_eef_offset_translation_torch = torch.as_tensor(
+            _ACTION_EEF_OFFSET_TRANSLATION, dtype=torch.float32, device=torch_device
+        ).expand(self.num_envs, -1)
+
+    @staticmethod
+    def _limit_vector_norm_torch(value: Any, maximum: float) -> Any:
+        import torch
+
+        norm = torch.linalg.vector_norm(value, dim=-1, keepdim=True)
+        scale = torch.clamp(float(maximum) / torch.clamp(norm, min=1.0e-8), max=1.0)
+        return value * scale
+
+    def _eef_fk_jacobian_torch(self, q: Any) -> tuple[Any, Any, Any]:
+        """Evaluate the Nero MDH pose and spatial Jacobian for every world."""
+        import torch
+
+        batch = q.shape[0]
+        rotation = torch.eye(3, dtype=q.dtype, device=q.device).expand(batch, -1, -1).clone()
+        position = torch.zeros((batch, 3), dtype=q.dtype, device=q.device)
+        origins = []
+        axes = []
+        zeros = torch.zeros(batch, dtype=q.dtype, device=q.device)
+        for joint, (d_i, a_i, alpha_i, theta_offset) in enumerate(_NERO_MDH):
+            ca = math.cos(alpha_i)
+            sa = math.sin(alpha_i)
+            local_position = q.new_tensor((a_i, -sa * d_i, ca * d_i)).expand(batch, -1)
+            origin = position + torch.bmm(rotation, local_position.unsqueeze(-1)).squeeze(-1)
+            local_axis = q.new_tensor((0.0, -sa, ca)).expand(batch, -1)
+            axis = torch.bmm(rotation, local_axis.unsqueeze(-1)).squeeze(-1)
+            origins.append(origin)
+            axes.append(axis)
+
+            theta = q[:, joint] + theta_offset
+            ct = torch.cos(theta)
+            st = torch.sin(theta)
+            row0 = torch.stack((ct, -st, zeros), dim=-1)
+            row1 = torch.stack((ca * st, ca * ct, zeros - sa), dim=-1)
+            row2 = torch.stack((sa * st, sa * ct, zeros + ca), dim=-1)
+            link_rotation = torch.stack((row0, row1, row2), dim=1)
+            position = origin
+            rotation = torch.bmm(rotation, link_rotation)
+
+        joint_origins = torch.stack(origins, dim=1)
+        joint_axes = torch.stack(axes, dim=1)
+        linear = torch.linalg.cross(joint_axes, position[:, None, :] - joint_origins, dim=-1)
+        jacobian = torch.cat((linear.transpose(1, 2), joint_axes.transpose(1, 2)), dim=1)
+        return position, rotation, jacobian
+
+    @staticmethod
+    def _rotation_6d_to_matrix_torch(rot6d: Any, fallback: Any) -> Any:
+        """Convert the first-two-columns 6D convention used by the dataset."""
+        import torch
+
+        raw0 = rot6d[:, 0:3]
+        raw1 = rot6d[:, 3:6]
+        norm0 = torch.linalg.vector_norm(raw0, dim=-1, keepdim=True)
+        column0 = raw0 / torch.clamp(norm0, min=1.0e-8)
+        orthogonal1 = raw1 - torch.sum(column0 * raw1, dim=-1, keepdim=True) * column0
+        norm1 = torch.linalg.vector_norm(orthogonal1, dim=-1, keepdim=True)
+        column1 = orthogonal1 / torch.clamp(norm1, min=1.0e-8)
+        column2 = torch.linalg.cross(column0, column1, dim=-1)
+        rotation = torch.stack((column0, column1, column2), dim=2)
+        valid = torch.isfinite(rot6d).all(dim=-1) & (norm0[:, 0] > 1.0e-8) & (norm1[:, 0] > 1.0e-8)
+        return torch.where(valid[:, None, None], rotation, fallback)
+
+    def _apply_eef_pose_action_torch(self) -> None:
+        """Decode absolute dataset actions into batched arm and hand targets."""
+        import torch
+
+        with torch.autocast(device_type="cuda", enabled=False):
+            self._apply_eef_pose_action_torch_fp32(torch)
+
+    def _apply_eef_pose_action_torch_fp32(self, torch: Any) -> None:
+        action = wp.to_torch(self._action)
+        joint_q = wp.to_torch(self.state_0.joint_q)
+        current_q = joint_q[self._arm_q_indices_torch]
+        q_command = current_q
+        current_position, current_rotation, _ = self._eef_fk_jacobian_torch(current_q)
+        command_position = action[:, 0:3]
+        command_rotation_fallback = torch.bmm(
+            torch.bmm(self._state_to_action_rotation_torch, current_rotation),
+            self._action_eef_offset_rotation_torch,
+        )
+        command_rotation = self._rotation_6d_to_matrix_torch(action[:, 3:9], command_rotation_fallback)
+        target_rotation = torch.bmm(
+            torch.bmm(self._state_to_action_rotation_torch.transpose(1, 2), command_rotation),
+            self._action_eef_offset_rotation_torch.transpose(1, 2),
+        )
+        target_position = torch.bmm(
+            self._state_to_action_rotation_torch.transpose(1, 2),
+            (command_position - self._state_to_action_translation_torch).unsqueeze(-1),
+        ).squeeze(-1)
+        target_position = target_position - torch.bmm(
+            target_rotation, self._action_eef_offset_translation_torch.unsqueeze(-1)
+        ).squeeze(-1)
+        target_position = torch.where(torch.isfinite(target_position), target_position, current_position)
+
+        for _ in range(self.config.ik_iterations):
+            position, rotation, jacobian = self._eef_fk_jacobian_torch(q_command)
+            position_error = self._limit_vector_norm_torch(target_position - position, self.config.ik_max_task_step_m)
+            orientation_error = 0.5 * (
+                torch.linalg.cross(rotation[:, :, 0], target_rotation[:, :, 0], dim=-1)
+                + torch.linalg.cross(rotation[:, :, 1], target_rotation[:, :, 1], dim=-1)
+                + torch.linalg.cross(rotation[:, :, 2], target_rotation[:, :, 2], dim=-1)
+            )
+            orientation_error = self._limit_vector_norm_torch(orientation_error, self.config.ik_max_rotation_step_rad)
+            error = torch.cat((position_error, orientation_error), dim=-1)
+            weights = error.new_tensor((self.config.ik_position_weight,) * 3 + (self.config.ik_orientation_weight,) * 3)
+            weighted_jacobian = jacobian * weights[None, :, None]
+            weighted_error = error * weights[None, :]
+            system = torch.bmm(weighted_jacobian.transpose(1, 2), weighted_jacobian)
+            system = system + (self.config.ik_damping_lambda**2) * self._ik_identity_torch
+            rhs = torch.bmm(weighted_jacobian.transpose(1, 2), weighted_error.unsqueeze(-1))
+            step = torch.linalg.solve(system, rhs).squeeze(-1)
+            step = torch.nan_to_num(step, nan=0.0, posinf=0.0, neginf=0.0)
+            q_command = torch.clamp(q_command + step, self._arm_lower_torch, self._arm_upper_torch)
+            q_command = torch.clamp(
+                q_command,
+                current_q - self.config.ik_max_joint_step_rad,
+                current_q + self.config.ik_max_joint_step_rad,
+            )
+
+        hand_current = joint_q[self._hand_q_indices_torch]
+        hand_target = torch.where(torch.isfinite(action[:, 9:19]), action[:, 9:19], hand_current)
+        hand_target = torch.clamp(
+            hand_target,
+            hand_current - self.config.hand_max_joint_step_rad,
+            hand_current + self.config.hand_max_joint_step_rad,
+        )
+        hand_target = torch.clamp(hand_target, self._hand_lower_torch, self._hand_upper_torch)
+
+        target_q = wp.to_torch(self.control.joint_target_q)
+        target_qd = wp.to_torch(self.control.joint_target_qd)
+        target_q[self._arm_q_indices_torch] = q_command
+        target_q[self._hand_q_indices_torch] = hand_target
+        target_qd[self._arm_qd_indices_torch] = (q_command - current_q) / self.control_dt
+        target_qd[self._hand_qd_indices_torch] = 0.0
 
     def _setup_task_indices(self) -> None:
         self._bottle_body_local = self._find_local_body_index("dynamic_bottle")
@@ -803,15 +1066,13 @@ class GrootNewtonEnv:
         self._shape_is_bottle = wp.array(shape_is_bottle, dtype=wp.int32, device=self.device)
 
     def _setup_observation_arrays(self) -> None:
-        self._action = wp.zeros((self.num_envs, ACTION_SIZE), dtype=wp.float32, device=self.device)
+        self._action = wp.zeros((self.num_envs, self.action_size), dtype=wp.float32, device=self.device)
         self._eef_9d = wp.zeros((self.num_envs, 9), dtype=wp.float32, device=self.device)
         self._arm_joint_pos = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
         self._hand_joint_pos = wp.zeros((self.num_envs, 10), dtype=wp.float32, device=self.device)
-        self._agent_qpos = wp.zeros((self.num_envs, ACTION_SIZE), dtype=wp.float32, device=self.device)
-        self._agent_qvel = wp.zeros((self.num_envs, ACTION_SIZE), dtype=wp.float32, device=self.device)
-        self._policy_state = wp.zeros(
-            (self.num_envs, POLICY_PROPRIO_SIZE + self.dofs_per_world), dtype=wp.float32, device=self.device
-        )
+        self._agent_qpos = wp.zeros((self.num_envs, JOINT_ACTION_SIZE), dtype=wp.float32, device=self.device)
+        self._agent_qvel = wp.zeros((self.num_envs, JOINT_ACTION_SIZE), dtype=wp.float32, device=self.device)
+        self._policy_state = wp.zeros((self.num_envs, POLICY_PROPRIO_SIZE), dtype=wp.float32, device=self.device)
         self._hand_command_limits = wp.array(
             np.asarray(_HAND_COMMAND_LIMITS, dtype=np.float32), dtype=wp.float32, device=self.device
         )
@@ -897,8 +1158,12 @@ class GrootNewtonEnv:
                 return gym.spaces.Dict({key: tree_space(child, batched=batched) for key, child in value.items()})
             return array_space(value, batched=batched)
 
-        self.single_action_space = gym.spaces.Box(-1.0, 1.0, shape=(ACTION_SIZE,), dtype=np.float32)
-        self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(self.num_envs, ACTION_SIZE), dtype=np.float32)
+        action_low = -np.inf if self.control_mode == "pd_eef_pose_abs" else -1.0
+        action_high = np.inf if self.control_mode == "pd_eef_pose_abs" else 1.0
+        self.single_action_space = gym.spaces.Box(action_low, action_high, shape=(self.action_size,), dtype=np.float32)
+        self.action_space = gym.spaces.Box(
+            action_low, action_high, shape=(self.num_envs, self.action_size), dtype=np.float32
+        )
         observation = self.observation_warp()
         if isinstance(observation, wp.array):
             self.single_observation_space = gym.spaces.Box(
@@ -1037,9 +1302,12 @@ class GrootNewtonEnv:
         wp.copy(self._action, action_wp)
 
     def _apply_action(self) -> None:
+        if self.control_mode == "pd_eef_pose_abs":
+            self._apply_eef_pose_action_torch()
+            return
         wp.launch(
             _apply_joint_targets,
-            dim=(self.num_envs, ACTION_SIZE),
+            dim=(self.num_envs, JOINT_ACTION_SIZE),
             inputs=[
                 self._action,
                 self.state_0.joint_q,
@@ -1193,7 +1461,6 @@ class GrootNewtonEnv:
             inputs=[
                 self.state_0.joint_q,
                 self.state_0.joint_qd,
-                self.state_0.mujoco.qfrc_actuator,
                 self.model.joint_coord_world_start,
                 self.model.joint_dof_world_start,
                 self._arm_local_q,
@@ -1211,7 +1478,6 @@ class GrootNewtonEnv:
                 self._agent_qpos,
                 self._agent_qvel,
                 self._policy_state,
-                self.dofs_per_world,
             ],
             device=self.device,
         )
@@ -1220,11 +1486,9 @@ class GrootNewtonEnv:
 
     def observation_warp(self) -> Any:
         """Return the current observation as device-resident Warp views."""
-        qfrc = self.state_0.mujoco.qfrc_actuator.reshape((self.num_envs, self.dofs_per_world))
         agent = {
             "qpos": self._agent_qpos,
             "qvel": self._agent_qvel,
-            "qfrc_actuator": qfrc,
             "arm_joint_pos": self._arm_joint_pos,
             "hand_joint_pos": self._hand_joint_pos,
         }
@@ -1261,10 +1525,11 @@ class GrootNewtonEnv:
         return {"agent": agent, "extra": extra, "sensor_data": sensor_data}
 
     def policy_observation_warp(self) -> dict[str, Any]:
-        """Return the compact state and per-camera RGB views used by visual policies."""
-        observation = {"state": self._policy_state}
+        """Return fields using the existing LeRobot dataset feature names."""
+        observation = {"observation.state": self._policy_state}
         if self._expose_images:
-            observation["rgb"] = {"ego_view": self._ego_rgb, "wrist_view": self._wrist_rgb}
+            observation["observation.images.ego_view"] = self._ego_rgb
+            observation["observation.images.wrist_view"] = self._wrist_rgb
         return observation
 
     def policy_observation(self) -> dict[str, Any]:
@@ -1293,6 +1558,7 @@ class GrootNewtonEnv:
             "success": self._success,
             "fail": self._fail,
             "is_grasped": self._is_grasped,
+            "is_lifted": self._is_obj_placed,
             "is_obj_placed": self._is_obj_placed,
             "is_robot_static": self._is_robot_static,
         }
@@ -1323,6 +1589,7 @@ class GrootNewtonEnv:
             },
             "reward_components": {
                 "reaching": self._reaching_reward,
+                "lift": self._place_reward,
                 "place": self._place_reward,
                 "static": self._static_reward,
                 "dense": self._dense_reward,
@@ -1330,10 +1597,29 @@ class GrootNewtonEnv:
         }
 
     def hold_action(self) -> wp.array:
-        """Return a normalized GPU action that holds the controlled joints."""
+        """Return a GPU action that holds the current absolute targets."""
+        if self.control_mode == "pd_eef_pose_abs":
+            action = wp.to_torch(self._action)
+            joint_q = wp.to_torch(self.state_0.joint_q)
+            position, rotation, _ = self._eef_fk_jacobian_torch(joint_q[self._arm_q_indices_torch])
+            command_rotation = wp.to_torch(self._action).new_empty((self.num_envs, 3, 3))
+            command_rotation.copy_(
+                self._state_to_action_rotation_torch @ rotation @ self._action_eef_offset_rotation_torch
+            )
+            command_position = self._state_to_action_translation_torch + (
+                self._state_to_action_rotation_torch
+                @ (
+                    position + (rotation @ self._action_eef_offset_translation_torch.unsqueeze(-1)).squeeze(-1)
+                ).unsqueeze(-1)
+            ).squeeze(-1)
+            action[:, :3].copy_(command_position)
+            action[:, 3:6].copy_(command_rotation[:, :, 0])
+            action[:, 6:9].copy_(command_rotation[:, :, 1])
+            action[:, 9:19].copy_(wp.to_torch(self._hand_joint_pos))
+            return self._action
         wp.launch(
             _gather_joint_position_action,
-            dim=(self.num_envs, ACTION_SIZE),
+            dim=(self.num_envs, JOINT_ACTION_SIZE),
             inputs=[
                 self.state_0.joint_q,
                 self.model.joint_coord_world_start,
@@ -1410,13 +1696,6 @@ class GrootNewtonEnv:
             ],
             device=self.device,
         )
-        for state in (self.state_0, self.state_1):
-            wp.launch(
-                _clear_reset_qfrc,
-                dim=(self.num_envs, self.dofs_per_world),
-                inputs=[mask_wp, state.mujoco.qfrc_actuator, self.model.joint_dof_world_start, self.dofs_per_world],
-                device=self.device,
-            )
         self._initialize_task_goal(mask_wp)
         self.model.bvh_refit_shapes(self.state_0)
         self._refresh_observation(read_contacts=False, reset_mask=mask_wp)
@@ -1533,7 +1812,7 @@ class GrootNewtonEnv:
         )
 
     def step(self, action: Any) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
-        """Apply one normalized action and return the Gymnasium five-tuple on CUDA."""
+        """Apply one action and return the Gymnasium five-tuple on CUDA."""
         result = self.step_warp(action)
         return tuple(self._to_torch_tree(value) for value in result)
 

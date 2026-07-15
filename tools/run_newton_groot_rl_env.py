@@ -23,12 +23,20 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--obs-mode", choices=("state", "state_dict", "rgb", "state_dict+rgb", "policy"), default="state_dict+rgb"
     )
-    parser.add_argument("--control-mode", choices=("pd_joint_pos", "pd_joint_delta_pos"), default="pd_joint_delta_pos")
+    parser.add_argument(
+        "--control-mode",
+        choices=("pd_eef_pose_abs", "pd_joint_pos", "pd_joint_delta_pos"),
+        default="pd_eef_pose_abs",
+    )
     parser.add_argument(
         "--reward-mode", choices=("none", "sparse", "dense", "normalized_dense"), default="normalized_dense"
     )
     parser.add_argument("--arm-action-delta", type=float, default=0.1)
     parser.add_argument("--hand-action-delta", type=float, default=0.1)
+    parser.add_argument("--ik-iterations", type=int, default=4)
+    parser.add_argument("--ik-damping-lambda", type=float, default=0.02)
+    parser.add_argument("--ik-max-joint-step-rad", type=float, default=0.045)
+    parser.add_argument("--hand-max-joint-step-rad", type=float, default=0.08)
     parser.add_argument("--bottle-lift-height", type=float, default=0.1)
     parser.add_argument("--ego-width", type=int, default=320)
     parser.add_argument("--ego-height", type=int, default=180)
@@ -59,6 +67,10 @@ def main() -> None:
         reward_mode=args.reward_mode,
         arm_action_delta=args.arm_action_delta,
         hand_action_delta=args.hand_action_delta,
+        ik_iterations=args.ik_iterations,
+        ik_damping_lambda=args.ik_damping_lambda,
+        ik_max_joint_step_rad=args.ik_max_joint_step_rad,
+        hand_max_joint_step_rad=args.hand_max_joint_step_rad,
         bottle_lift_height=args.bottle_lift_height,
         capture_graph=not args.no_capture_graph,
         render_images=not args.no_images,

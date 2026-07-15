@@ -15,7 +15,7 @@ try:
 except ImportError:
     gym = None
 
-from .groot_newton_env import ACTION_SIZE, GrootNewtonEnv
+from .groot_newton_env import GrootNewtonEnv
 
 
 class GrootDiffusionPolicyEnv:
@@ -33,6 +33,7 @@ class GrootDiffusionPolicyEnv:
         self.env = env
         self.num_envs = env.num_envs
         self.device = env.device
+        self.action_size = env.action_size
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
         self.action_space = env.action_space
@@ -183,7 +184,7 @@ class GrootDiffusionPolicyEnv:
         return self._history, info
 
     def step(self, action: Any) -> tuple[dict[str, Any], Any, Any, Any, dict[str, Any]]:
-        """Execute one action or a ``[num_envs, horizon, 17]`` action chunk.
+        """Execute one action or a ``[num_envs, horizon, action_size]`` chunk.
 
         For a chunk, rewards are summed until each world first terminates or
         truncates. The returned observation is the final history after the
@@ -195,10 +196,10 @@ class GrootDiffusionPolicyEnv:
         if action.ndim == 2:
             _, reward, terminated, truncated, info = self.env.step(action)
             return self._push_history(self.env.policy_observation()), reward, terminated, truncated, info
-        if action.ndim != 3 or action.shape[0] != self.num_envs or action.shape[2] != ACTION_SIZE:
+        if action.ndim != 3 or action.shape[0] != self.num_envs or action.shape[2] != self.action_size:
             raise ValueError(
-                f"action must have shape ({self.num_envs}, {ACTION_SIZE}) or "
-                f"({self.num_envs}, horizon, {ACTION_SIZE}), got {tuple(action.shape)}"
+                f"action must have shape ({self.num_envs}, {self.action_size}) or "
+                f"({self.num_envs}, horizon, {self.action_size}), got {tuple(action.shape)}"
             )
         if action.shape[1] < 1 or action.shape[1] > self.action_horizon:
             raise ValueError(f"action chunk horizon must be in [1, {self.action_horizon}], got {action.shape[1]}")
