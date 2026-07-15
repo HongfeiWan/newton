@@ -11,6 +11,8 @@ from typing import Any
 
 from teleop_stack.datasets.groot_lerobot import ACTION_KEY, EGO_KEY, STATE_KEY, WRIST_KEY
 
+GROOT_DP_CHECKPOINT_FORMAT = "teleop_stack.groot_l10_diffusion_policy.v2.row_first_state_target"
+
 
 @dataclass(frozen=True)
 class GrootDiffusionPolicyConfig:

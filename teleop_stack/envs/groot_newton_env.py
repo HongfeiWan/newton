@@ -116,13 +116,6 @@ _NERO_MDH = (
     (0.0235, 0.0, math.pi / 2.0, 0.0),
 )
 
-# Existing data records state in the Nero/CAN frame and absolute EEF actions
-# after node0's fixed A * T * B command transform.
-_STATE_TO_ACTION_ROTATION = ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0))
-_STATE_TO_ACTION_TRANSLATION = (0.0, 0.059, 0.918)
-_ACTION_EEF_OFFSET_ROTATION = ((0.0, 0.0, 1.0), (-1.0, 0.0, 0.0), (0.0, -1.0, 0.0))
-_ACTION_EEF_OFFSET_TRANSLATION = (0.032, 0.0, -0.0235)
-
 
 @dataclass(frozen=True)
 class GrootNewtonEnvConfig:
@@ -346,11 +339,11 @@ def _extract_state(
     eef_out[world, 1] = position[1]
     eef_out[world, 2] = position[2]
     eef_out[world, 3] = rotation[0, 0]
-    eef_out[world, 4] = rotation[1, 0]
-    eef_out[world, 5] = rotation[2, 0]
-    eef_out[world, 6] = rotation[0, 1]
+    eef_out[world, 4] = rotation[0, 1]
+    eef_out[world, 5] = rotation[0, 2]
+    eef_out[world, 6] = rotation[1, 0]
     eef_out[world, 7] = rotation[1, 1]
-    eef_out[world, 8] = rotation[2, 1]
+    eef_out[world, 8] = rotation[1, 2]
     for index in range(9):
         policy_state_out[world, 7 + index] = eef_out[world, index]
 
@@ -885,18 +878,6 @@ class GrootNewtonEnv:
         self._hand_lower_torch = torch.as_tensor(hand_lower, dtype=torch.float32, device=torch_device)
         self._hand_upper_torch = torch.as_tensor(hand_upper, dtype=torch.float32, device=torch_device)
         self._ik_identity_torch = torch.eye(7, dtype=torch.float32, device=torch_device).expand(self.num_envs, -1, -1)
-        self._state_to_action_rotation_torch = torch.as_tensor(
-            _STATE_TO_ACTION_ROTATION, dtype=torch.float32, device=torch_device
-        ).expand(self.num_envs, -1, -1)
-        self._state_to_action_translation_torch = torch.as_tensor(
-            _STATE_TO_ACTION_TRANSLATION, dtype=torch.float32, device=torch_device
-        ).expand(self.num_envs, -1)
-        self._action_eef_offset_rotation_torch = torch.as_tensor(
-            _ACTION_EEF_OFFSET_ROTATION, dtype=torch.float32, device=torch_device
-        ).expand(self.num_envs, -1, -1)
-        self._action_eef_offset_translation_torch = torch.as_tensor(
-            _ACTION_EEF_OFFSET_TRANSLATION, dtype=torch.float32, device=torch_device
-        ).expand(self.num_envs, -1)
 
     @staticmethod
     def _limit_vector_norm_torch(value: Any, maximum: float) -> Any:
@@ -944,18 +925,18 @@ class GrootNewtonEnv:
 
     @staticmethod
     def _rotation_6d_to_matrix_torch(rot6d: Any, fallback: Any) -> Any:
-        """Convert the first-two-columns 6D convention used by the dataset."""
+        """Convert GR00T's row-major first-two-rows rotation representation."""
         import torch
 
         raw0 = rot6d[:, 0:3]
         raw1 = rot6d[:, 3:6]
         norm0 = torch.linalg.vector_norm(raw0, dim=-1, keepdim=True)
-        column0 = raw0 / torch.clamp(norm0, min=1.0e-8)
-        orthogonal1 = raw1 - torch.sum(column0 * raw1, dim=-1, keepdim=True) * column0
+        row0 = raw0 / torch.clamp(norm0, min=1.0e-8)
+        orthogonal1 = raw1 - torch.sum(row0 * raw1, dim=-1, keepdim=True) * row0
         norm1 = torch.linalg.vector_norm(orthogonal1, dim=-1, keepdim=True)
-        column1 = orthogonal1 / torch.clamp(norm1, min=1.0e-8)
-        column2 = torch.linalg.cross(column0, column1, dim=-1)
-        rotation = torch.stack((column0, column1, column2), dim=2)
+        row1 = orthogonal1 / torch.clamp(norm1, min=1.0e-8)
+        row2 = torch.linalg.cross(row0, row1, dim=-1)
+        rotation = torch.stack((row0, row1, row2), dim=1)
         valid = torch.isfinite(rot6d).all(dim=-1) & (norm0[:, 0] > 1.0e-8) & (norm1[:, 0] > 1.0e-8)
         return torch.where(valid[:, None, None], rotation, fallback)
 
@@ -972,23 +953,8 @@ class GrootNewtonEnv:
         current_q = joint_q[self._arm_q_indices_torch]
         q_command = current_q
         current_position, current_rotation, _ = self._eef_fk_jacobian_torch(current_q)
-        command_position = action[:, 0:3]
-        command_rotation_fallback = torch.bmm(
-            torch.bmm(self._state_to_action_rotation_torch, current_rotation),
-            self._action_eef_offset_rotation_torch,
-        )
-        command_rotation = self._rotation_6d_to_matrix_torch(action[:, 3:9], command_rotation_fallback)
-        target_rotation = torch.bmm(
-            torch.bmm(self._state_to_action_rotation_torch.transpose(1, 2), command_rotation),
-            self._action_eef_offset_rotation_torch.transpose(1, 2),
-        )
-        target_position = torch.bmm(
-            self._state_to_action_rotation_torch.transpose(1, 2),
-            (command_position - self._state_to_action_translation_torch).unsqueeze(-1),
-        ).squeeze(-1)
-        target_position = target_position - torch.bmm(
-            target_rotation, self._action_eef_offset_translation_torch.unsqueeze(-1)
-        ).squeeze(-1)
+        target_position = action[:, 0:3]
+        target_rotation = self._rotation_6d_to_matrix_torch(action[:, 3:9], current_rotation)
         target_position = torch.where(torch.isfinite(target_position), target_position, current_position)
 
         for _ in range(self.config.ik_iterations):
@@ -1602,19 +1568,9 @@ class GrootNewtonEnv:
             action = wp.to_torch(self._action)
             joint_q = wp.to_torch(self.state_0.joint_q)
             position, rotation, _ = self._eef_fk_jacobian_torch(joint_q[self._arm_q_indices_torch])
-            command_rotation = wp.to_torch(self._action).new_empty((self.num_envs, 3, 3))
-            command_rotation.copy_(
-                self._state_to_action_rotation_torch @ rotation @ self._action_eef_offset_rotation_torch
-            )
-            command_position = self._state_to_action_translation_torch + (
-                self._state_to_action_rotation_torch
-                @ (
-                    position + (rotation @ self._action_eef_offset_translation_torch.unsqueeze(-1)).squeeze(-1)
-                ).unsqueeze(-1)
-            ).squeeze(-1)
-            action[:, :3].copy_(command_position)
-            action[:, 3:6].copy_(command_rotation[:, :, 0])
-            action[:, 6:9].copy_(command_rotation[:, :, 1])
+            action[:, :3].copy_(position)
+            action[:, 3:6].copy_(rotation[:, 0, :])
+            action[:, 6:9].copy_(rotation[:, 1, :])
             action[:, 9:19].copy_(wp.to_torch(self._hand_joint_pos))
             return self._action
         wp.launch(

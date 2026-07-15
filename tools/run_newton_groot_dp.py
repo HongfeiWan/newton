@@ -7,13 +7,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import time
 from pathlib import Path
 
 import numpy as np
 
 from teleop_stack.envs import GrootDiffusionPolicyEnv, GrootNewtonEnv, GrootNewtonEnvConfig
-from teleop_stack.policies import GrootDiffusionPolicy, GrootDiffusionPolicyConfig
+from teleop_stack.policies import GROOT_DP_CHECKPOINT_FORMAT, GrootDiffusionPolicy, GrootDiffusionPolicyConfig
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -35,13 +37,42 @@ def main() -> None:
     from diffusers.schedulers.scheduling_ddpm import DDPMScheduler  # noqa: PLC0415
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    if checkpoint.get("format") != GROOT_DP_CHECKPOINT_FORMAT:
+        raise ValueError(
+            f"Checkpoint format {checkpoint.get('format')!r} is incompatible with the canonical row-first "
+            f"state-target environment; expected {GROOT_DP_CHECKPOINT_FORMAT!r}. Retrain from the repaired dataset."
+        )
     config = GrootDiffusionPolicyConfig(**checkpoint["config"])
+    if config.state_dim != 26 or config.action_dim != 19:
+        raise ValueError(
+            f"Expected checkpoint state/action dimensions 26/19, got {config.state_dim}/{config.action_dim}"
+        )
+    if not 1 <= args.action_horizon <= config.pred_horizon:
+        raise ValueError(f"action_horizon must be between 1 and checkpoint pred_horizon={config.pred_horizon}")
     state = checkpoint["model"]
+    stats = checkpoint.get("train_dataset_stats")
+    if not isinstance(stats, dict):
+        raise ValueError("Checkpoint does not contain train_dataset_stats")
+    canonical = json.dumps(stats, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    stats_sha256 = hashlib.sha256(canonical).hexdigest()
+    if checkpoint.get("train_dataset_stats_sha256") != stats_sha256:
+        raise ValueError("Checkpoint train statistics SHA-256 does not match its payload")
+    for name, width in (("state_min", 26), ("state_max", 26), ("action_min", 19), ("action_max", 19)):
+        values = np.asarray(stats.get(name), dtype=np.float32)
+        if values.shape != (width,) or not np.isfinite(values).all():
+            raise ValueError(f"Checkpoint {name} must be finite with shape ({width},)")
+        model_values = state.get(name)
+        if model_values is None or not np.array_equal(np.asarray(model_values.cpu()), values):
+            raise ValueError(f"Checkpoint {name} payload does not match the model normalization buffer")
+    if np.any(np.asarray(stats["state_min"]) > np.asarray(stats["state_max"])):
+        raise ValueError("Checkpoint state_min must not exceed state_max")
+    if np.any(np.asarray(stats["action_min"]) > np.asarray(stats["action_max"])):
+        raise ValueError("Checkpoint action_min must not exceed action_max")
     model = GrootDiffusionPolicy(
-        state_min=state.get("state_min", np.zeros(config.state_dim, dtype=np.float32)),
-        state_max=state.get("state_max", np.ones(config.state_dim, dtype=np.float32)),
-        action_min=state.get("action_min", np.zeros(config.action_dim, dtype=np.float32)),
-        action_max=state.get("action_max", np.ones(config.action_dim, dtype=np.float32)),
+        state_min=stats["state_min"],
+        state_max=stats["state_max"],
+        action_min=stats["action_min"],
+        action_max=stats["action_max"],
         config=config,
     )
     model.load_state_dict(state)

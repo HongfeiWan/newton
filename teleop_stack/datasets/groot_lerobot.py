@@ -24,6 +24,11 @@ WRIST_KEY = "observation.images.wrist_view"
 ACTION_KEY = "action"
 STATE_SIZE = 26
 ACTION_SIZE = 19
+ROW_FIRST_ROT6D_SUFFIXES = ("r00", "r01", "r02", "r10", "r11", "r12")
+ROW_FIRST_ROT6D_CONVENTION = "row_major_first_two_rows_[r00,r01,r02,r10,r11,r12]"
+DP_ACTION_SEMANTICS = "absolute_flange_pose_and_hand_from_observation_state_same_frame"
+ARM_ACTION_SEMANTICS = "absolute_flange_pose_xyz_rot6d_target_in_state_frame"
+ROT6D_MIGRATION_SCHEMA = "teleop_stack.rot6d_physical_truth_migration.v1"
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,7 @@ class GrootLeRobotBCSplit:
     """Reproducible successful-demonstration split for behavior cloning."""
 
     episodes_sha256: str
+    numeric_data_sha256: str
     split_seed: int
     validation_fraction: float
     source_episode_count: int
@@ -51,6 +57,105 @@ class GrootLeRobotBCSplit:
     excluded_duplicate_episode_indices: tuple[int, ...]
     train_raw_episode_ids: tuple[str, ...]
     validation_raw_episode_ids: tuple[str, ...]
+
+
+def _validate_dataset_contract(info: dict[str, Any]) -> None:
+    features = info.get("features")
+    if not isinstance(features, dict):
+        raise ValueError("Dataset metadata does not contain features")
+    for key, width, start, stop in (
+        (STATE_KEY, STATE_SIZE, 10, 16),
+        (ACTION_KEY, ACTION_SIZE, 3, 9),
+    ):
+        feature = features.get(key)
+        if not isinstance(feature, dict) or feature.get("dtype") != "float32" or feature.get("shape") != [width]:
+            raise ValueError(f"Dataset metadata does not describe canonical {key} float32[{width}]")
+        names = feature.get("names")
+        if not isinstance(names, list) or len(names) != width:
+            raise ValueError(f"Dataset {key} must provide {width} component names")
+        suffixes = tuple(str(name).rsplit(".", 1)[-1] for name in names[start:stop])
+        if suffixes != ROW_FIRST_ROT6D_SUFFIXES:
+            raise ValueError(f"Dataset {key} Rot6D names do not use the canonical row-first convention: {suffixes}")
+
+    teleop = info.get("teleop_stack")
+    if not isinstance(teleop, dict):
+        raise ValueError("Dataset metadata does not contain teleop_stack contract metadata")
+    expected_contract = {
+        "rot6d_convention": ROW_FIRST_ROT6D_CONVENTION,
+        "arm_action_semantics": ARM_ACTION_SEMANTICS,
+        "dp_action_semantics": DP_ACTION_SEMANTICS,
+        "dp_action_source_slices": {"eef": [7, 16], "hand": [16, 26]},
+    }
+    mismatches = {
+        key: {"actual": teleop.get(key), "expected": expected}
+        for key, expected in expected_contract.items()
+        if teleop.get(key) != expected
+    }
+    migration = teleop.get("rot6d_raw_truth_migration")
+    if not isinstance(migration, dict) or migration.get("schema") != ROT6D_MIGRATION_SCHEMA:
+        mismatches["rot6d_raw_truth_migration.schema"] = {
+            "actual": migration.get("schema") if isinstance(migration, dict) else None,
+            "expected": ROT6D_MIGRATION_SCHEMA,
+        }
+    provenance = teleop.get("dp_action_provenance")
+    if not isinstance(provenance, dict) or provenance.get("mode") != "state_copy":
+        mismatches["dp_action_provenance.mode"] = {
+            "actual": provenance.get("mode") if isinstance(provenance, dict) else None,
+            "expected": "state_copy",
+        }
+    if mismatches:
+        raise ValueError(
+            f"Dataset metadata is incompatible with the canonical row-first state-target DP contract: {mismatches}"
+        )
+
+
+def _validate_episode_migration(episodes: Sequence[dict[str, Any]]) -> None:
+    invalid = []
+    for row in episodes:
+        metadata = row.get("teleop_stack_metadata")
+        migration = metadata.get("rot6d_raw_truth_migration") if isinstance(metadata, dict) else None
+        if not isinstance(migration, dict) or migration.get("schema") != ROT6D_MIGRATION_SCHEMA:
+            invalid.append(int(row["episode_index"]))
+    if invalid:
+        raise ValueError(f"Episodes are missing raw-truth Rot6D migration evidence: {invalid[:8]}")
+
+
+def _numeric_data_sha256(root: Path, episodes: Sequence[dict[str, Any]]) -> str:
+    """Hash logical state/action values independently of Parquet encoding."""
+    import pyarrow.parquet as parquet  # noqa: PLC0415
+
+    digest = hashlib.sha256()
+    for metadata in episodes:
+        episode_index = int(metadata["episode_index"])
+        path = root / "data" / f"chunk-{episode_index // 1000:03d}" / f"episode_{episode_index:06d}.parquet"
+        table = parquet.read_table(path, columns=[STATE_KEY, ACTION_KEY])
+        digest.update(episode_index.to_bytes(8, byteorder="little", signed=False))
+        state: np.ndarray | None = None
+        for key, width in ((STATE_KEY, STATE_SIZE), (ACTION_KEY, ACTION_SIZE)):
+            values = np.asarray(table[key].combine_chunks().to_pylist(), dtype=np.float32)
+            expected_shape = (int(metadata["length"]), width)
+            if values.shape != expected_shape:
+                raise ValueError(
+                    f"Episode {episode_index} {key} shape does not match metadata: "
+                    f"got {values.shape}, expected {expected_shape}"
+                )
+            if not np.isfinite(values).all():
+                raise ValueError(f"Episode {episode_index} {key} contains non-finite values")
+            digest.update(key.encode("utf-8"))
+            digest.update(np.asarray(values.shape, dtype=np.int64).tobytes())
+            digest.update(np.ascontiguousarray(values).tobytes())
+            if key == STATE_KEY:
+                state = values
+            else:
+                assert state is not None
+                expected_action = np.concatenate((state[:, 7:16], state[:, 16:26]), axis=1)
+                if not np.allclose(values, expected_action, rtol=0.0, atol=1.0e-6):
+                    maximum = float(np.max(np.abs(values - expected_action)))
+                    raise ValueError(
+                        f"Episode {episode_index} action is not the same-frame state EEF/hand target: "
+                        f"max_abs={maximum:.8g}"
+                    )
+    return digest.hexdigest()
 
 
 def _load_episode_metadata(root: Path, expected_count: int) -> tuple[list[dict[str, Any]], str]:
@@ -90,8 +195,11 @@ def create_groot_lerobot_bc_split(
         raise ValueError("validation_fraction must be between zero and one")
     dataset_root = Path(root).expanduser().resolve()
     info = json.loads((dataset_root / "meta" / "info.json").read_text(encoding="utf-8"))
+    _validate_dataset_contract(info)
     source_episode_count = int(info["total_episodes"])
     episodes, episodes_sha256 = _load_episode_metadata(dataset_root, source_episode_count)
+    _validate_episode_migration(episodes)
+    numeric_data_sha256 = _numeric_data_sha256(dataset_root, episodes)
 
     selected: list[dict[str, Any]] = []
     excluded_unsuccessful: list[int] = []
@@ -146,6 +254,7 @@ def create_groot_lerobot_bc_split(
 
     return GrootLeRobotBCSplit(
         episodes_sha256=episodes_sha256,
+        numeric_data_sha256=numeric_data_sha256,
         split_seed=int(split_seed),
         validation_fraction=float(validation_fraction),
         source_episode_count=source_episode_count,
@@ -197,6 +306,7 @@ class GrootLeRobotWindowDataset:
         self.info = self._load_json(self.root / "meta" / "info.json")
         self._validate_metadata()
         self.all_episodes, self.episodes_sha256 = _load_episode_metadata(self.root, int(self.info["total_episodes"]))
+        _validate_episode_migration(self.all_episodes)
         if episode_indices is None:
             selected_indices = tuple(range(len(self.all_episodes)))
         else:
@@ -227,6 +337,7 @@ class GrootLeRobotWindowDataset:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _validate_metadata(self) -> None:
+        _validate_dataset_contract(self.info)
         features = self.info.get("features", {})
         expected = {
             STATE_KEY: ("float32", [STATE_SIZE]),
@@ -289,6 +400,14 @@ class GrootLeRobotWindowDataset:
             if state.shape != (length, STATE_SIZE) or action.shape != (length, ACTION_SIZE):
                 raise ValueError(
                     f"Episode {episode_index} numeric shapes do not match metadata: state={state.shape} action={action.shape}"
+                )
+            if not np.isfinite(state).all() or not np.isfinite(action).all():
+                raise ValueError(f"Episode {episode_index} state/action contains non-finite values")
+            expected_action = np.concatenate((state[:, 7:16], state[:, 16:26]), axis=1)
+            if not np.allclose(action, expected_action, rtol=0.0, atol=1.0e-6):
+                maximum = float(np.max(np.abs(action - expected_action)))
+                raise ValueError(
+                    f"Episode {episode_index} action is not the same-frame state EEF/hand target: max_abs={maximum:.8g}"
                 )
             output.append({STATE_KEY: state, ACTION_KEY: action})
         return output

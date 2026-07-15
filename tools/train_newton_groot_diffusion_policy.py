@@ -7,14 +7,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from teleop_stack.datasets import GrootLeRobotWindowDataset, create_groot_lerobot_bc_split
-from teleop_stack.policies import GrootDiffusionPolicy, GrootDiffusionPolicyConfig
+from teleop_stack.policies import GROOT_DP_CHECKPOINT_FORMAT, GrootDiffusionPolicy, GrootDiffusionPolicyConfig
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -64,19 +67,60 @@ def _checkpoint_payload(
     step: int,
     config: Any,
     dataset_split: Any,
+    dataset_stats: dict[str, Any],
+    dataset_stats_sha256: str,
     best_validation_loss: float,
 ) -> dict[str, Any]:
     payload = {
-        "format": "teleop_stack.groot_l10_diffusion_policy.v1",
+        "format": GROOT_DP_CHECKPOINT_FORMAT,
         "step": int(step),
         "config": asdict(config),
         "dataset_split": asdict(dataset_split),
+        "train_dataset_stats": dataset_stats,
+        "train_dataset_stats_sha256": dataset_stats_sha256,
         "best_validation_loss": float(best_validation_loss),
         "model": model.state_dict(),
     }
     if optimizer is not None:
         payload["optimizer"] = optimizer.state_dict()
     return payload
+
+
+def _dataset_stats_payload(stats: Any) -> tuple[dict[str, list[float]], str]:
+    payload = {
+        name: getattr(stats, name).astype(float).tolist()
+        for name in ("state_min", "state_max", "action_min", "action_max")
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return payload, hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_dataset_stats_artifact(
+    dataset_root: Path,
+    dataset_split: Any,
+    dataset_stats: dict[str, list[float]],
+) -> None:
+    path = dataset_root / "meta" / "dp_train_stats.json"
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    if artifact.get("schema") != "newton.groot_diffusion_policy.train_stats.v1":
+        raise ValueError(f"Unexpected DP train statistics schema in {path}")
+    artifact_split = artifact.get("split")
+    if not isinstance(artifact_split, dict):
+        raise ValueError(f"DP train statistics do not contain a split in {path}")
+    split_fields = (
+        "train_episode_indices",
+        "validation_episode_indices",
+        "excluded_unsuccessful_episode_indices",
+        "excluded_duplicate_episode_indices",
+    )
+    for name in split_fields:
+        expected = list(getattr(dataset_split, name))
+        if artifact_split.get(name) != expected:
+            raise ValueError(f"DP train statistics {name} do not match the selected dataset split in {path}")
+    for name, expected in dataset_stats.items():
+        actual = np.asarray(artifact.get(name), dtype=np.float32)
+        if not np.array_equal(actual, np.asarray(expected, dtype=np.float32)):
+            raise ValueError(f"DP train statistics {name} do not match numeric Parquet data in {path}")
 
 
 def _save_checkpoint(payload: dict[str, Any], path: Path) -> None:
@@ -159,6 +203,8 @@ def main() -> None:
         video_decode_threads=args.video_decode_threads,
         require_frame_cache=args.require_frame_cache,
     )
+    dataset_stats, dataset_stats_sha256 = _dataset_stats_payload(train_dataset.stats)
+    _validate_dataset_stats_artifact(args.dataset, dataset_split, dataset_stats)
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -202,8 +248,19 @@ def main() -> None:
     best_validation_loss = float("inf")
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        if checkpoint.get("format") != GROOT_DP_CHECKPOINT_FORMAT:
+            raise ValueError(
+                f"Resume checkpoint format {checkpoint.get('format')!r} is incompatible with "
+                f"{GROOT_DP_CHECKPOINT_FORMAT!r}"
+            )
+        if checkpoint.get("config") != asdict(config):
+            raise ValueError("Resume checkpoint model config does not match the current training options")
         if checkpoint.get("dataset_split") != asdict(dataset_split):
             raise ValueError("Resume checkpoint dataset split does not match the current dataset metadata and options")
+        if checkpoint.get("train_dataset_stats_sha256") != dataset_stats_sha256:
+            raise ValueError("Resume checkpoint train statistics do not match the current dataset")
+        if checkpoint.get("train_dataset_stats") != dataset_stats:
+            raise ValueError("Resume checkpoint train statistics payload does not match the current dataset")
         if "optimizer" not in checkpoint:
             raise ValueError("Resume checkpoint does not contain optimizer state; use a numbered training checkpoint")
         model.load_state_dict(checkpoint["model"])
@@ -217,6 +274,15 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "dataset_split.json").write_text(
         json.dumps(asdict(dataset_split), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (args.output_dir / "train_dataset_stats.json").write_text(
+        json.dumps(
+            {"sha256": dataset_stats_sha256, **dataset_stats},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(
@@ -275,6 +341,8 @@ def main() -> None:
                             step,
                             config,
                             dataset_split,
+                            dataset_stats,
+                            dataset_stats_sha256,
                             best_validation_loss,
                         ),
                         args.output_dir / "best.pt",
@@ -288,6 +356,8 @@ def main() -> None:
                         step,
                         config,
                         dataset_split,
+                        dataset_stats,
+                        dataset_stats_sha256,
                         best_validation_loss,
                     ),
                     checkpoint_path,

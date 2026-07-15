@@ -25,17 +25,36 @@
 [eef_xyz_target(3), eef_rotation_6d_target(6), hand_joint_target(10)]
 ```
 
-Rotation-6D 严格按数据集元数据中的 `r00,r10,r20,r01,r11,r21` 保存旋转矩阵前两列。环境内部先做 Gram-Schmidt 正交化，再用于 IK。
-
-还要注意 state EEF 与 action EEF 的固定坐标变换。数据集 state 是 Nero/CAN 基座帧，而 action 是 node0 写入数据集的绝对命令帧：
+Rotation-6D 与 GR00T 核心协议一致，按旋转矩阵前两行保存：
 
 ```text
-T_action = A_state_to_action · T_state_target · B_eef_offset
+[r00, r01, r02, r10, r11, r12]
 ```
 
-环境把 `A⁻¹ · T_action · B⁻¹` 放在 GPU 上求回 Nero/CAN 目标后再做 IK。`hold_action()` 则执行正向 `A·T·B`，因此输出与数据集 action 的数值范围和坐标语义一致。
+state EEF 和 action EEF 都使用 Nero/CAN 基座下的 flange pose。数据集加载时会强制检查 row-first
+分量名、`rot6d_convention` 和 state-copy action metadata，不符合契约的数据会在训练开始前报错。修复后的行为克隆数据把每一帧的
+`state[7:16]` 作为该帧绝对 EEF action target，因此环境把反归一化后的 XYZ 和旋转矩阵直接交给
+GPU IK，不再重复应用旧 node0 command frame 的 `A·T·B` 变换：
 
-`env.step()` 接收的是已经反归一化的物理动作，不是 `[-1, 1]` 关节动作。DP 网络在 GPU 上使用数据集 min/max 训练；推理结束后在 GPU 上反归一化，再把 19 维绝对目标交给环境。
+```text
+T_ik_target = T_action = T_state_target
+```
+
+`hold_action()` 同样直接输出当前 FK flange pose，保证 observation、action 和 IK 三端使用同一坐标系和
+row-first Rot6D 协议。
+
+`env.step()` 接收的是已经反归一化的物理动作，不是 `[-1, 1]` 关节动作。DP 网络使用训练 split 的
+min/max；训练输出会保存统计值及其 SHA-256，同时 split 指纹覆盖 Parquet 中实际的 state/action 数值，
+修复数据后不能误用旧 checkpoint resume。
+
+当前修复版按 `raw_episode_id` 审计每个 clip，并以同一行 `state[:7]` 的 Nero SDK/CAN MDH flange FK
+作为物理旋转真值。只有 episode 20–42 的 `state[10:16]` 和 `action[3:9]` 做了矩阵转置后重新
+row-first 编码；其他数值分量保持逐位不变。`info.json` 和每条 episode metadata 都带
+`teleop_stack.rot6d_physical_truth_migration.v1` 证据。加载器还会扫描所有 Parquet，拒绝 NaN/Inf，
+并验证每帧 `action == concat(state[7:16], state[16:26])`（`atol=1e-6`）。
+
+`numeric_data_sha256` 对所有 episode 的逻辑 float32 state/action 内容计算，与 Parquet codec 或文件字节
+无关；它不覆盖视频字节或图像预处理代码。视频缓存未因数值旋转修复而失效，因此继续复用。
 
 ## 图像链路
 
@@ -58,7 +77,7 @@ wrist_view 640x480
 默认控制模式为 `pd_eef_pose_abs`。每个控制周期执行：
 
 1. 从 19 维 action 读取绝对命令帧 EEF 9D 和绝对手指 10D 目标。
-2. 在 GPU 上执行固定 `A⁻¹·T·B⁻¹`，得到 Nero/CAN 基座帧目标。
+2. 将同一 Nero/CAN 基座帧下的 flange XYZ 和 row-first Rot6D 直接作为 GPU IK 目标。
 3. 在 CUDA Torch 上批量计算 Nero MDH FK 和 `[N, 6, 7]` 空间 Jacobian。
 4. 对所有 world 批量执行 damped least-squares。
 5. 将每周期臂关节步长限制为默认 `0.045 rad`，手指步长限制为 `0.08 rad`。
@@ -173,9 +192,12 @@ conda_envs/newton/bin/python tools/train_newton_groot_diffusion_policy.py \
   --steps 100000
 ```
 
-网络包含两个独立 camera encoder、一个 26 维 state encoder 和一个预测 16×19 action noise 的 temporal denoiser。训练、归一化、augmentation 后的 resize、noise scheduler 和 loss 都在 GPU。
+网络包含两个独立 camera encoder、一个 26 维 state encoder 和一个预测 16×19 action noise 的 temporal denoiser。训练、归一化、resize、noise scheduler 和 loss 都在 GPU。
 训练目录会写入可审计的 `dataset_split.json`，定期保存可恢复训练的 step checkpoint，并把 validation loss
-最低的纯模型权重保存为推理用 `best.pt`。归一化统计只从 train split 计算，validation 复用 train 统计。
+最低的模型保存为推理用 `best.pt`。归一化统计只从 train split 计算，validation 复用 train 统计；训练前
+会把独立重算值与数据集的 `meta/dp_train_stats.json` 逐元素核对。checkpoint 同时保存 numeric fingerprint、
+统计 payload 和统计 SHA-256；resume 会核对格式、网络配置、split、数值指纹和统计，推理也会核对统计
+payload 与模型 normalization buffer。
 
 运行 checkpoint：
 

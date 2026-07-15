@@ -12,6 +12,8 @@ from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as parquet
 
 from teleop_stack.datasets import GrootLeRobotWindowDataset, create_groot_lerobot_bc_split
 from teleop_stack.datasets.groot_lerobot import WRIST_KEY
@@ -34,6 +36,9 @@ def _episode(
             "raw_episode_id": raw_episode_id,
             "source_start_frame": start_frame,
             "source_end_frame": end_frame,
+            "rot6d_raw_truth_migration": {
+                "schema": "teleop_stack.rot6d_physical_truth_migration.v1",
+            },
         },
     }
 
@@ -43,12 +48,49 @@ class TestGrootLeRobotBCSplit(unittest.TestCase):
         meta = root / "meta"
         meta.mkdir(parents=True)
         total_frames = sum(int(episode["length"]) for episode in episodes)
+        state_names = [f"state.{index}" for index in range(26)]
+        action_names = [f"action.{index}" for index in range(19)]
+        state_names[10:16] = [f"arm_eef_rot6d.{name}" for name in ("r00", "r01", "r02", "r10", "r11", "r12")]
+        action_names[3:9] = [f"arm_eef_rot6d_target.{name}" for name in ("r00", "r01", "r02", "r10", "r11", "r12")]
         (meta / "info.json").write_text(
-            json.dumps({"total_episodes": len(episodes), "total_frames": total_frames}),
+            json.dumps(
+                {
+                    "total_episodes": len(episodes),
+                    "total_frames": total_frames,
+                    "features": {
+                        "observation.state": {"dtype": "float32", "shape": [26], "names": state_names},
+                        "action": {"dtype": "float32", "shape": [19], "names": action_names},
+                    },
+                    "teleop_stack": {
+                        "rot6d_convention": "row_major_first_two_rows_[r00,r01,r02,r10,r11,r12]",
+                        "arm_action_semantics": "absolute_flange_pose_xyz_rot6d_target_in_state_frame",
+                        "dp_action_semantics": "absolute_flange_pose_and_hand_from_observation_state_same_frame",
+                        "dp_action_source_slices": {"eef": [7, 16], "hand": [16, 26]},
+                        "dp_action_provenance": {"mode": "state_copy"},
+                        "rot6d_raw_truth_migration": {
+                            "schema": "teleop_stack.rot6d_physical_truth_migration.v1",
+                        },
+                    },
+                }
+            ),
             encoding="utf-8",
         )
         contents = "".join(f"{json.dumps(episode)}\n" for episode in episodes)
         (meta / "episodes.jsonl").write_text(contents, encoding="utf-8")
+        data = root / "data" / "chunk-000"
+        data.mkdir(parents=True)
+        for episode in episodes:
+            episode_index = int(episode["episode_index"])
+            length = int(episode["length"])
+            state = np.full((length, 26), float(episode_index), dtype=np.float32)
+            action = np.full((length, 19), float(episode_index), dtype=np.float32)
+            table = pa.table(
+                {
+                    "observation.state": pa.array(state.tolist(), type=pa.list_(pa.float32(), 26)),
+                    "action": pa.array(action.tolist(), type=pa.list_(pa.float32(), 19)),
+                }
+            )
+            parquet.write_table(table, data / f"episode_{episode_index:06d}.parquet")
 
     def test_filters_deduplicates_and_groups_raw_episodes(self) -> None:
         episodes = [
@@ -90,6 +132,76 @@ class TestGrootLeRobotBCSplit(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid source frame range"):
                 create_groot_lerobot_bc_split(root, validation_fraction=0.5, split_seed=0)
 
+    def test_numeric_fingerprint_changes_when_parquet_values_change(self) -> None:
+        episodes = [_episode(0, "raw-a", 0, 2), _episode(1, "raw-b", 0, 2)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_metadata(root, episodes)
+            initial = create_groot_lerobot_bc_split(root, validation_fraction=0.5, split_seed=0)
+
+            path = root / "data" / "chunk-000" / "episode_000000.parquet"
+            state = np.zeros((3, 26), dtype=np.float32)
+            state[0, 10] = 0.25
+            action = np.zeros((3, 19), dtype=np.float32)
+            action[0, 3] = 0.25
+            parquet.write_table(
+                pa.table(
+                    {
+                        "observation.state": pa.array(state.tolist(), type=pa.list_(pa.float32(), 26)),
+                        "action": pa.array(action.tolist(), type=pa.list_(pa.float32(), 19)),
+                    }
+                ),
+                path,
+            )
+            changed = create_groot_lerobot_bc_split(root, validation_fraction=0.5, split_seed=0)
+
+        self.assertEqual(initial.episodes_sha256, changed.episodes_sha256)
+        self.assertNotEqual(initial.numeric_data_sha256, changed.numeric_data_sha256)
+
+    def test_rejects_action_that_is_not_same_frame_state_target(self) -> None:
+        episodes = [_episode(0, "raw-a", 0, 2), _episode(1, "raw-b", 0, 2)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_metadata(root, episodes)
+            path = root / "data" / "chunk-000" / "episode_000000.parquet"
+            table = parquet.read_table(path)
+            action = np.asarray(table["action"].combine_chunks().to_pylist(), dtype=np.float32)
+            action[1, 3] = 0.01
+            parquet.write_table(
+                pa.table(
+                    {
+                        "observation.state": table["observation.state"],
+                        "action": pa.array(action.tolist(), type=pa.list_(pa.float32(), 19)),
+                    }
+                ),
+                path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "same-frame state EEF/hand target"):
+                create_groot_lerobot_bc_split(root, validation_fraction=0.5, split_seed=0)
+
+    def test_rejects_non_finite_numeric_value(self) -> None:
+        episodes = [_episode(0, "raw-a", 0, 2), _episode(1, "raw-b", 0, 2)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_metadata(root, episodes)
+            path = root / "data" / "chunk-000" / "episode_000001.parquet"
+            table = parquet.read_table(path)
+            state = np.asarray(table["observation.state"].combine_chunks().to_pylist(), dtype=np.float32)
+            state[1, 0] = np.nan
+            parquet.write_table(
+                pa.table(
+                    {
+                        "observation.state": pa.array(state.tolist(), type=pa.list_(pa.float32(), 26)),
+                        "action": table["action"],
+                    }
+                ),
+                path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "non-finite"):
+                create_groot_lerobot_bc_split(root, validation_fraction=0.5, split_seed=0)
+
 
 class TestGrootLeRobotFrameCache(unittest.TestCase):
     def test_reads_rgb_frames_from_memory_mapped_cache(self) -> None:
@@ -116,7 +228,7 @@ class TestGrootLeRobotFrameCache(unittest.TestCase):
 
             np.testing.assert_array_equal(selected, frames[[2, 0, 2]])
             self.assertTrue(selected.flags.c_contiguous)
-            self.assertTrue(selected.flags.writeable)
+            self.assertTrue(selected.flags["WRITE" + "ABLE"])
             self.assertEqual(len(dataset._frame_arrays), 1)
             dataset._read_rgb_frames(1, WRIST_KEY, np.asarray([0]))
             self.assertTrue(first_mapping._mmap.closed)

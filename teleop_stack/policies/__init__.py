@@ -3,6 +3,6 @@
 
 """Policies used by the teleoperation reinforcement-learning environments."""
 
-from .groot_diffusion_policy import GrootDiffusionPolicy, GrootDiffusionPolicyConfig
+from .groot_diffusion_policy import GROOT_DP_CHECKPOINT_FORMAT, GrootDiffusionPolicy, GrootDiffusionPolicyConfig
 
-__all__ = ["GrootDiffusionPolicy", "GrootDiffusionPolicyConfig"]
+__all__ = ["GROOT_DP_CHECKPOINT_FORMAT", "GrootDiffusionPolicy", "GrootDiffusionPolicyConfig"]

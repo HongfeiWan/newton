@@ -47,6 +47,13 @@ from teleop_stack.ik import (  # noqa: E402
 )
 from teleop_stack.ik.nero_can_fk import nero_can_flange_pose_from_joints  # noqa: E402
 from teleop_stack.models import NamedJointValues, Pose7  # noqa: E402
+from teleop_stack.policies.groot_rotation_contract import (  # noqa: E402
+    GROOT_ROW_MAJOR_FIRST_TWO_ROWS,
+    LEGACY_FIRST_TWO_COLUMNS_COLUMN_MAJOR,
+    ROT6D_CONVERSION_ALGORITHM,
+    convert_eef_9d_rotation,
+    row_first_rot6d_to_matrix,
+)
 from teleop_stack.retargeting.hand_config import load_linker_l10_right_hand_spec  # noqa: E402
 from teleop_stack.robots.newton_runtime import NewtonLinkKinematicsModel  # noqa: E402
 from teleop_stack.teleop.spatial_frames import matrix_to_quat_xyzw, quat_xyzw_to_matrix  # noqa: E402
@@ -572,20 +579,7 @@ def _rotmat_to_rot6d(rotation: np.ndarray) -> np.ndarray:
 
 
 def _rot6d_to_rotmat(rot6d: np.ndarray) -> np.ndarray:
-    rows = np.asarray(rot6d, dtype=np.float64).reshape(2, 3)
-    row0 = rows[0]
-    row1 = rows[1]
-    row0_norm = float(np.linalg.norm(row0))
-    if row0_norm <= 1.0e-8:
-        return np.eye(3, dtype=np.float64)
-    row0 = row0 / row0_norm
-    row1 = row1 - float(np.dot(row0, row1)) * row0
-    row1_norm = float(np.linalg.norm(row1))
-    if row1_norm <= 1.0e-8:
-        return np.eye(3, dtype=np.float64)
-    row1 = row1 / row1_norm
-    row2 = np.cross(row0, row1)
-    return np.vstack((row0, row1, row2))
+    return row_first_rot6d_to_matrix(np.asarray(rot6d)).reshape(3, 3)
 
 
 def _eef_9d_to_pose(eef_9d: np.ndarray) -> np.ndarray:
