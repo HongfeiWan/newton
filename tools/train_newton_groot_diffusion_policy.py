@@ -28,6 +28,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-workers", type=int, default=2)
     parser.add_argument("--video-cache-size", type=int, default=8)
     parser.add_argument("--video-decode-threads", type=int, default=1)
+    parser.add_argument("--require-frame-cache", action="store_true")
     parser.add_argument("--prefetch-factor", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1.0e-4)
     parser.add_argument("--weight-decay", type=float, default=1.0e-6)
@@ -146,6 +147,7 @@ def main() -> None:
         episode_indices=dataset_split.train_episode_indices,
         video_cache_size=args.video_cache_size,
         video_decode_threads=args.video_decode_threads,
+        require_frame_cache=args.require_frame_cache,
     )
     validation_dataset = GrootLeRobotWindowDataset(
         args.dataset,
@@ -155,6 +157,7 @@ def main() -> None:
         stats=train_dataset.stats,
         video_cache_size=args.video_cache_size,
         video_decode_threads=args.video_decode_threads,
+        require_frame_cache=args.require_frame_cache,
     )
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -221,7 +224,8 @@ def main() -> None:
         f"excluded_failed={len(dataset_split.excluded_unsuccessful_episode_indices)} "
         f"excluded_duplicates={len(dataset_split.excluded_duplicate_episode_indices)} "
         f"train={len(train_dataset.episodes)} episodes/{len(train_dataset)} frames "
-        f"validation={len(validation_dataset.episodes)} episodes/{len(validation_dataset)} frames",
+        f"validation={len(validation_dataset.episodes)} episodes/{len(validation_dataset)} frames "
+        f"frame_caches={train_dataset.frame_cache_file_count + validation_dataset.frame_cache_file_count}",
         flush=True,
     )
     iterator = iter(train_loader)

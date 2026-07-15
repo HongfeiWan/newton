@@ -145,8 +145,9 @@ sample = train_dataset[0]
 - action：从当前帧开始的未来 16 个绝对动作，episode 末尾使用最后动作 padding；
 - `action_is_pad`：使 diffusion loss 忽略末尾 padding；
 - 数值数据：启动时读取所选 episode 的全部状态和动作，体积相对视频很小；
-- 视频：保持 H.264 压缩，由 DataLoader worker 解码，并通过 pinned memory/non-blocking copy 送入 GPU；
-- 每个 worker 默认最多缓存 8 个 `VideoCapture`，且每个 FFmpeg decoder 只使用 1 个线程，避免多日期数据随机采样时耗尽主机线程和文件句柄。
+- 视频：若相邻的 `.mp4.frames.npy` RGB 缓存存在，DataLoader worker 会优先用只读 mmap 随机取帧；缺少缓存时才回退到 H.264 解码；
+- 每个 worker 默认最多保留 8 个 mmap 或 `VideoCapture`，且每个回退用的 FFmpeg decoder 只使用 1 个线程，避免多日期数据随机采样时耗尽主机线程和文件句柄；
+- `--require-frame-cache` 可让训练在任何所选相机缓存缺失时立即失败，避免正式任务静默回退到低吞吐的 MP4 随机 seek。
 
 BC split 会先排除 `success != true` 或 `outcome != "success"` 的轨迹，再按
 `raw_episode_id + source_start_frame + source_end_frame` 删除精确重复 clip。不同范围的 clip 会保留，
@@ -164,6 +165,7 @@ conda_envs/newton/bin/python tools/train_newton_groot_diffusion_policy.py \
   --validation-workers 2 \
   --video-cache-size 8 \
   --video-decode-threads 1 \
+  --require-frame-cache \
   --prefetch-factor 1 \
   --validation-fraction 0.1 \
   --split-seed 0 \
@@ -189,14 +191,15 @@ conda_envs/newton/bin/python tools/run_newton_groot_dp.py \
 | 路径 | 位置 | 原因 |
 | --- | --- | --- |
 | URDF/GLB/JSON/Parquet metadata 加载 | CPU，初始化阶段 | 文件 I/O 和场景构建 |
-| H.264 MP4 解码 | CPU DataLoader worker | 当前依赖中没有 NVDEC/DALI 解码链路 |
+| `.frames.npy` 随机取帧 | CPU DataLoader worker + OS page cache | 只读 mmap，仅复制当前 batch |
+| H.264 MP4 回退解码 | CPU DataLoader worker | 当前依赖中没有 NVDEC/DALI 解码链路 |
 | pinned batch 到 CUDA | 异步传输 | `non_blocking=True` |
 | DP encoder、归一化、denoiser、loss | GPU | 训练主路径 |
 | Newton physics、camera render、reward、reset | GPU | batched Warp/MJWarp |
 | EEF FK/Jacobian/DLS IK | GPU | batched Torch |
 | qfrc/log/export | 不启用 | 第一版协议明确排除 |
 
-不能把 H.264 解码宣称为“全 GPU”。若视频输入成为训练瓶颈，下一步应增加一次性预处理的 mmap frame cache，或接入 NVDEC/DALI；不建议把全部原始视频长期常驻显存。当前数据预处理后约数 GB，放主机内存/本地 NVMe 更合理，GPU 只保留正在训练的 batch。
+不能把视频文件读取宣称为“全 GPU”。现有远端 smooth 数据已经包含逐帧 mmap cache，训练器不会把约 153 GB 缓存整体载入内存或显存，只依赖 OS page cache 并复制当前 batch。若仍需提高上限，可再接入 NVDEC/DALI 或生成降采样后的训练缓存；不建议把全部原始视频长期常驻显存。
 
 ## 当前可训练范围
 

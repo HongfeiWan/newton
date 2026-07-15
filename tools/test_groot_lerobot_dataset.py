@@ -8,9 +8,13 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from collections import OrderedDict
 from pathlib import Path
 
-from teleop_stack.datasets import create_groot_lerobot_bc_split
+import numpy as np
+
+from teleop_stack.datasets import GrootLeRobotWindowDataset, create_groot_lerobot_bc_split
+from teleop_stack.datasets.groot_lerobot import WRIST_KEY
 
 
 def _episode(
@@ -85,6 +89,41 @@ class TestGrootLeRobotBCSplit(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "invalid source frame range"):
                 create_groot_lerobot_bc_split(root, validation_fraction=0.5, split_seed=0)
+
+
+class TestGrootLeRobotFrameCache(unittest.TestCase):
+    def test_reads_rgb_frames_from_memory_mapped_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = GrootLeRobotWindowDataset.__new__(GrootLeRobotWindowDataset)
+            dataset.root = Path(directory)
+            dataset.preprocess_ego = False
+            dataset.video_cache_size = 1
+            dataset.video_decode_threads = 1
+            dataset.info = {"features": {WRIST_KEY: {"shape": [2, 3, 3]}}}
+            dataset.all_episodes = [{"length": 3}, {"length": 3}]
+            dataset._captures = OrderedDict()
+            dataset._frame_arrays = OrderedDict()
+            dataset._video_resource_order = OrderedDict()
+            cache_path = dataset._frame_cache_path(0, WRIST_KEY)
+            cache_path.parent.mkdir(parents=True)
+            frames = np.arange(3 * 2 * 3 * 3, dtype=np.uint8).reshape(3, 2, 3, 3)
+            np.save(cache_path, frames)
+            second_cache_path = dataset._frame_cache_path(1, WRIST_KEY)
+            np.save(second_cache_path, frames + 1)
+
+            selected = dataset._read_rgb_frames(0, WRIST_KEY, np.asarray([2, 0, 2]))
+            first_mapping = dataset._frame_arrays[(0, WRIST_KEY)]
+
+            np.testing.assert_array_equal(selected, frames[[2, 0, 2]])
+            self.assertTrue(selected.flags.c_contiguous)
+            self.assertTrue(selected.flags.writeable)
+            self.assertEqual(len(dataset._frame_arrays), 1)
+            dataset._read_rgb_frames(1, WRIST_KEY, np.asarray([0]))
+            self.assertTrue(first_mapping._mmap.closed)
+            self.assertEqual(tuple(dataset._frame_arrays), ((1, WRIST_KEY),))
+            dataset.close()
+            self.assertFalse(dataset._frame_arrays)
+            np.testing.assert_array_equal(selected, frames[[2, 0, 2]])
 
 
 if __name__ == "__main__":

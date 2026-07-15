@@ -163,10 +163,11 @@ class GrootLeRobotWindowDataset:
     """Read observation histories and future absolute-action windows.
 
     Numeric Parquet columns are loaded once because the current dataset is
-    small. H.264 frames remain compressed and are decoded in DataLoader
-    workers; returned pinned CPU tensors can then be copied to CUDA with
-    ``non_blocking=True``. The head camera uses the exact ROI/resize path used
-    by current GR00T simulator inference.
+    small. Existing ``.mp4.frames.npy`` RGB caches are read through bounded
+    memory maps when available; otherwise H.264 frames are decoded in
+    DataLoader workers. Returned pinned CPU tensors can then be copied to CUDA
+    with ``non_blocking=True``. The head camera uses the exact ROI/resize path
+    used by current GR00T simulator inference.
     """
 
     def __init__(
@@ -180,6 +181,7 @@ class GrootLeRobotWindowDataset:
         stats: GrootWindowDatasetStats | None = None,
         video_cache_size: int = 8,
         video_decode_threads: int = 1,
+        require_frame_cache: bool = False,
     ) -> None:
         if obs_horizon < 1 or pred_horizon < 1:
             raise ValueError("obs_horizon and pred_horizon must be positive")
@@ -191,6 +193,7 @@ class GrootLeRobotWindowDataset:
         self.preprocess_ego = bool(preprocess_ego)
         self.video_cache_size = int(video_cache_size)
         self.video_decode_threads = int(video_decode_threads)
+        self.require_frame_cache = bool(require_frame_cache)
         self.info = self._load_json(self.root / "meta" / "info.json")
         self._validate_metadata()
         self.all_episodes, self.episodes_sha256 = _load_episode_metadata(self.root, int(self.info["total_episodes"]))
@@ -215,6 +218,9 @@ class GrootLeRobotWindowDataset:
         self.stats = stats if stats is not None else self._compute_stats()
         self._validate_stats()
         self._captures: OrderedDict[tuple[int, str], Any] = OrderedDict()
+        self._frame_arrays: OrderedDict[tuple[int, str], np.ndarray] = OrderedDict()
+        self._video_resource_order: OrderedDict[tuple[int, str], str] = OrderedDict()
+        self.frame_cache_file_count = self._validate_frame_cache_files()
 
     @staticmethod
     def _load_json(path: Path) -> dict[str, Any]:
@@ -244,6 +250,31 @@ class GrootLeRobotWindowDataset:
 
     def _video_path(self, episode_index: int, key: str) -> Path:
         return self.root / "videos" / f"chunk-{episode_index // 1000:03d}" / key / f"episode_{episode_index:06d}.mp4"
+
+    def _frame_cache_path(self, episode_index: int, key: str) -> Path:
+        return Path(f"{self._video_path(episode_index, key)}.frames.npy")
+
+    def _validate_frame_cache_files(self) -> int:
+        count = 0
+        missing: list[Path] = []
+        for metadata in self.episodes:
+            episode_index = int(metadata["episode_index"])
+            for key in (EGO_KEY, WRIST_KEY):
+                path = self._frame_cache_path(episode_index, key)
+                if path.is_file():
+                    count += 1
+                    if self.require_frame_cache:
+                        frames = np.load(path, mmap_mode="r", allow_pickle=False)
+                        try:
+                            self._validate_frame_array(frames, episode_index, key, path)
+                        finally:
+                            self._close_frame_array(frames)
+                elif self.require_frame_cache:
+                    missing.append(path)
+        if missing:
+            preview = ", ".join(str(path) for path in missing[:3])
+            raise FileNotFoundError(f"Missing {len(missing)} required frame caches; first paths: {preview}")
+        return count
 
     def _load_numeric_episodes(self) -> list[dict[str, np.ndarray]]:
         import pyarrow.parquet as parquet  # noqa: PLC0415
@@ -299,6 +330,7 @@ class GrootLeRobotWindowDataset:
         cache_key = (episode_index, key)
         if cache_key in self._captures:
             self._captures.move_to_end(cache_key)
+            self._touch_video_resource(cache_key, "capture")
             return self._captures[cache_key]
         import cv2  # noqa: PLC0415
 
@@ -313,13 +345,64 @@ class GrootLeRobotWindowDataset:
             capture = cv2.VideoCapture(str(path))
         if not capture.isOpened():
             raise RuntimeError(f"Failed to open video: {path}")
-        while len(self._captures) >= self.video_cache_size:
-            _, evicted = self._captures.popitem(last=False)
-            evicted.release()
+        self._touch_video_resource(cache_key, "capture")
         self._captures[cache_key] = capture
         return capture
 
+    @staticmethod
+    def _close_frame_array(array: np.ndarray) -> None:
+        memory_map = getattr(array, "_mmap", None)
+        if memory_map is not None and not memory_map.closed:
+            memory_map.close()
+
+    def _touch_video_resource(self, cache_key: tuple[int, str], backend: str) -> None:
+        if cache_key in self._video_resource_order:
+            self._video_resource_order.move_to_end(cache_key)
+            return
+        while len(self._video_resource_order) >= self.video_cache_size:
+            evicted_key, evicted_backend = self._video_resource_order.popitem(last=False)
+            if evicted_backend == "capture":
+                self._captures.pop(evicted_key).release()
+            else:
+                self._close_frame_array(self._frame_arrays.pop(evicted_key))
+        self._video_resource_order[cache_key] = backend
+
+    def _validate_frame_array(self, frames: np.ndarray, episode_index: int, key: str, path: Path) -> None:
+        length = int(self.all_episodes[episode_index]["length"])
+        shape = tuple(int(value) for value in self.info["features"][key]["shape"])
+        if frames.dtype != np.uint8 or frames.shape != (length, *shape) or not frames.flags.c_contiguous:
+            raise ValueError(
+                f"Frame cache {path} does not match metadata: dtype={frames.dtype} shape={frames.shape}, "
+                f"expected contiguous uint8 {(length, *shape)}"
+            )
+
+    def _frame_array(self, episode_index: int, key: str) -> np.ndarray | None:
+        cache_key = (episode_index, key)
+        if cache_key in self._frame_arrays:
+            self._frame_arrays.move_to_end(cache_key)
+            self._touch_video_resource(cache_key, "frames")
+            return self._frame_arrays[cache_key]
+        path = self._frame_cache_path(episode_index, key)
+        if not path.is_file():
+            return None
+        frames = np.load(path, mmap_mode="r", allow_pickle=False)
+        try:
+            self._validate_frame_array(frames, episode_index, key, path)
+        except Exception:
+            self._close_frame_array(frames)
+            raise
+        self._touch_video_resource(cache_key, "frames")
+        self._frame_arrays[cache_key] = frames
+        return frames
+
     def _read_rgb_frames(self, episode_index: int, key: str, indices: np.ndarray) -> np.ndarray:
+        frame_array = self._frame_array(episode_index, key)
+        if frame_array is not None:
+            rgb_frames = np.array(frame_array[indices], dtype=np.uint8, order="C", copy=True)
+            if key == EGO_KEY and self.preprocess_ego:
+                rgb_frames = np.stack([preprocess_ego_rgb(frame) for frame in rgb_frames], axis=0)
+            return np.ascontiguousarray(rgb_frames)
+
         import cv2  # noqa: PLC0415
 
         capture = self._capture(episode_index, key)
@@ -357,16 +440,27 @@ class GrootLeRobotWindowDataset:
         }
 
     def close(self) -> None:
-        """Release OpenCV video handles owned by this process."""
+        """Release video handles and frame-cache memory maps owned by this process."""
         for capture in getattr(self, "_captures", {}).values():
             capture.release()
         if hasattr(self, "_captures"):
             self._captures.clear()
+        for frame_array in getattr(self, "_frame_arrays", {}).values():
+            self._close_frame_array(frame_array)
+        if hasattr(self, "_frame_arrays"):
+            self._frame_arrays.clear()
+        if hasattr(self, "_video_resource_order"):
+            self._video_resource_order.clear()
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         state["_captures"] = OrderedDict()
+        state["_frame_arrays"] = OrderedDict()
+        state["_video_resource_order"] = OrderedDict()
         return state
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
