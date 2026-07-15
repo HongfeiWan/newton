@@ -3,6 +3,16 @@
 
 """Dataset adapters for teleoperation policy training."""
 
-from .groot_lerobot import GrootLeRobotWindowDataset, GrootWindowDatasetStats
+from .groot_lerobot import (
+    GrootLeRobotBCSplit,
+    GrootLeRobotWindowDataset,
+    GrootWindowDatasetStats,
+    create_groot_lerobot_bc_split,
+)
 
-__all__ = ["GrootLeRobotWindowDataset", "GrootWindowDatasetStats"]
+__all__ = [
+    "GrootLeRobotBCSplit",
+    "GrootLeRobotWindowDataset",
+    "GrootWindowDatasetStats",
+    "create_groot_lerobot_bc_split",
+]

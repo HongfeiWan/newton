@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import random
+from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +36,129 @@ class GrootWindowDatasetStats:
     action_max: np.ndarray
 
 
+@dataclass(frozen=True)
+class GrootLeRobotBCSplit:
+    """Reproducible successful-demonstration split for behavior cloning."""
+
+    episodes_sha256: str
+    split_seed: int
+    validation_fraction: float
+    source_episode_count: int
+    source_frame_count: int
+    train_episode_indices: tuple[int, ...]
+    validation_episode_indices: tuple[int, ...]
+    excluded_unsuccessful_episode_indices: tuple[int, ...]
+    excluded_duplicate_episode_indices: tuple[int, ...]
+    train_raw_episode_ids: tuple[str, ...]
+    validation_raw_episode_ids: tuple[str, ...]
+
+
+def _load_episode_metadata(root: Path, expected_count: int) -> tuple[list[dict[str, Any]], str]:
+    episodes_path = root / "meta" / "episodes.jsonl"
+    contents = episodes_path.read_bytes()
+    rows = [json.loads(line) for line in contents.decode("utf-8").splitlines() if line.strip()]
+    rows.sort(key=lambda row: int(row["episode_index"]))
+    if len(rows) != expected_count:
+        raise ValueError(f"Expected {expected_count} episodes, found {len(rows)}")
+    for expected_index, row in enumerate(rows):
+        if int(row["episode_index"]) != expected_index:
+            raise ValueError("Dataset episode indices must be contiguous and zero based")
+    return rows, hashlib.sha256(contents).hexdigest()
+
+
+def create_groot_lerobot_bc_split(
+    root: str | Path,
+    *,
+    validation_fraction: float = 0.1,
+    split_seed: int = 0,
+) -> GrootLeRobotBCSplit:
+    """Select successful unique clips and split them by raw episode.
+
+    Exact duplicate clips are identified by raw episode ID and inclusive source
+    frame range. Distinct clips from one raw episode are retained but assigned
+    to the same split to prevent temporal leakage.
+
+    Args:
+        root: LeRobot dataset root.
+        validation_fraction: Fraction of raw episode groups reserved for validation.
+        split_seed: Seed used to shuffle raw episode groups deterministically.
+
+    Returns:
+        Successful, deduplicated train and validation episode indices.
+    """
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between zero and one")
+    dataset_root = Path(root).expanduser().resolve()
+    info = json.loads((dataset_root / "meta" / "info.json").read_text(encoding="utf-8"))
+    source_episode_count = int(info["total_episodes"])
+    episodes, episodes_sha256 = _load_episode_metadata(dataset_root, source_episode_count)
+
+    selected: list[dict[str, Any]] = []
+    excluded_unsuccessful: list[int] = []
+    excluded_duplicates: list[int] = []
+    seen_clips: dict[tuple[str, int, int], int] = {}
+    for row in episodes:
+        episode_index = int(row["episode_index"])
+        metadata = row.get("teleop_stack_metadata", {})
+        if metadata.get("success") is not True or metadata.get("outcome") != "success":
+            excluded_unsuccessful.append(episode_index)
+            continue
+
+        raw_episode_id = metadata.get("raw_episode_id")
+        start_frame = metadata.get("source_start_frame")
+        end_frame = metadata.get("source_end_frame")
+        if not isinstance(raw_episode_id, str) or not raw_episode_id:
+            raise ValueError(f"Episode {episode_index} does not have a valid raw_episode_id")
+        if start_frame is None or end_frame is None:
+            raise ValueError(f"Episode {episode_index} does not have a source frame range")
+        start_frame = int(start_frame)
+        end_frame = int(end_frame)
+        length = int(row["length"])
+        if start_frame < 0 or end_frame < start_frame or length != end_frame - start_frame + 1:
+            raise ValueError(
+                f"Episode {episode_index} has an invalid source frame range: "
+                f"start={start_frame} end={end_frame} length={length}"
+            )
+
+        clip_key = (raw_episode_id, start_frame, end_frame)
+        if clip_key in seen_clips:
+            excluded_duplicates.append(episode_index)
+            continue
+        seen_clips[clip_key] = episode_index
+        selected.append(row)
+
+    grouped_indices: defaultdict[str, list[int]] = defaultdict(list)
+    for row in selected:
+        metadata = row["teleop_stack_metadata"]
+        grouped_indices[str(metadata["raw_episode_id"])].append(int(row["episode_index"]))
+    raw_episode_ids = sorted(grouped_indices)
+    if len(raw_episode_ids) < 2:
+        raise ValueError("At least two successful raw episode groups are required for train/validation splitting")
+
+    shuffled_ids = raw_episode_ids.copy()
+    random.Random(int(split_seed)).shuffle(shuffled_ids)
+    validation_group_count = round(len(shuffled_ids) * float(validation_fraction))
+    validation_group_count = max(1, min(len(shuffled_ids) - 1, validation_group_count))
+    validation_ids = set(shuffled_ids[:validation_group_count])
+    train_ids = set(shuffled_ids[validation_group_count:])
+    train_indices = sorted(index for raw_id in train_ids for index in grouped_indices[raw_id])
+    validation_indices = sorted(index for raw_id in validation_ids for index in grouped_indices[raw_id])
+
+    return GrootLeRobotBCSplit(
+        episodes_sha256=episodes_sha256,
+        split_seed=int(split_seed),
+        validation_fraction=float(validation_fraction),
+        source_episode_count=source_episode_count,
+        source_frame_count=int(info["total_frames"]),
+        train_episode_indices=tuple(train_indices),
+        validation_episode_indices=tuple(validation_indices),
+        excluded_unsuccessful_episode_indices=tuple(excluded_unsuccessful),
+        excluded_duplicate_episode_indices=tuple(excluded_duplicates),
+        train_raw_episode_ids=tuple(sorted(train_ids)),
+        validation_raw_episode_ids=tuple(sorted(validation_ids)),
+    )
+
+
 class GrootLeRobotWindowDataset:
     """Read observation histories and future absolute-action windows.
 
@@ -49,6 +176,8 @@ class GrootLeRobotWindowDataset:
         obs_horizon: int = 2,
         pred_horizon: int = 16,
         preprocess_ego: bool = True,
+        episode_indices: Sequence[int] | None = None,
+        stats: GrootWindowDatasetStats | None = None,
     ) -> None:
         if obs_horizon < 1 or pred_horizon < 1:
             raise ValueError("obs_horizon and pred_horizon must be positive")
@@ -58,14 +187,27 @@ class GrootLeRobotWindowDataset:
         self.preprocess_ego = bool(preprocess_ego)
         self.info = self._load_json(self.root / "meta" / "info.json")
         self._validate_metadata()
-        self.episodes = self._load_episodes()
+        self.all_episodes, self.episodes_sha256 = _load_episode_metadata(self.root, int(self.info["total_episodes"]))
+        if episode_indices is None:
+            selected_indices = tuple(range(len(self.all_episodes)))
+        else:
+            selected_indices = tuple(int(index) for index in episode_indices)
+            if not selected_indices:
+                raise ValueError("episode_indices must not be empty")
+            if len(set(selected_indices)) != len(selected_indices):
+                raise ValueError("episode_indices must be unique")
+            if min(selected_indices) < 0 or max(selected_indices) >= len(self.all_episodes):
+                raise IndexError("episode_indices contains an out-of-range source episode")
+        self.episode_indices = selected_indices
+        self.episodes = [self.all_episodes[index] for index in selected_indices]
         self._numeric = self._load_numeric_episodes()
         self._samples = [
             (episode_index, frame_index)
             for episode_index, episode in enumerate(self.episodes)
             for frame_index in range(int(episode["length"]))
         ]
-        self.stats = self._compute_stats()
+        self.stats = stats if stats is not None else self._compute_stats()
+        self._validate_stats()
         self._captures: dict[tuple[int, str], Any] = {}
 
     @staticmethod
@@ -91,20 +233,6 @@ class GrootLeRobotWindowDataset:
         if int(self.info.get("fps", -1)) != 10:
             raise ValueError(f"Expected a 10 Hz dataset, got fps={self.info.get('fps')}")
 
-    def _load_episodes(self) -> list[dict[str, Any]]:
-        rows = []
-        with (self.root / "meta" / "episodes.jsonl").open(encoding="utf-8") as file:
-            for line in file:
-                if line.strip():
-                    rows.append(json.loads(line))
-        rows.sort(key=lambda row: int(row["episode_index"]))
-        if len(rows) != int(self.info["total_episodes"]):
-            raise ValueError(f"Expected {self.info['total_episodes']} episodes, found {len(rows)}")
-        for expected_index, row in enumerate(rows):
-            if int(row["episode_index"]) != expected_index:
-                raise ValueError("Dataset episode indices must be contiguous and zero based")
-        return rows
-
     def _parquet_path(self, episode_index: int) -> Path:
         return self.root / "data" / f"chunk-{episode_index // 1000:03d}" / f"episode_{episode_index:06d}.parquet"
 
@@ -115,7 +243,8 @@ class GrootLeRobotWindowDataset:
         import pyarrow.parquet as parquet  # noqa: PLC0415
 
         output = []
-        for episode_index, metadata in enumerate(self.episodes):
+        for metadata in self.episodes:
+            episode_index = int(metadata["episode_index"])
             table = parquet.read_table(self._parquet_path(episode_index), columns=[STATE_KEY, ACTION_KEY])
             state = np.asarray(table[STATE_KEY].combine_chunks().to_pylist(), dtype=np.float32)
             action = np.asarray(table[ACTION_KEY].combine_chunks().to_pylist(), dtype=np.float32)
@@ -136,6 +265,22 @@ class GrootLeRobotWindowDataset:
             action_min=action.min(axis=0),
             action_max=action.max(axis=0),
         )
+
+    def _validate_stats(self) -> None:
+        expected_shapes = {
+            "state_min": (STATE_SIZE,),
+            "state_max": (STATE_SIZE,),
+            "action_min": (ACTION_SIZE,),
+            "action_max": (ACTION_SIZE,),
+        }
+        for name, shape in expected_shapes.items():
+            value = np.asarray(getattr(self.stats, name))
+            if value.shape != shape or not np.isfinite(value).all():
+                raise ValueError(f"Dataset statistics {name} must be finite with shape {shape}, got {value.shape}")
+        if np.any(np.asarray(self.stats.state_min) > np.asarray(self.stats.state_max)):
+            raise ValueError("Dataset state_min must not exceed state_max")
+        if np.any(np.asarray(self.stats.action_min) > np.asarray(self.stats.action_max)):
+            raise ValueError("Dataset action_min must not exceed action_max")
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -178,12 +323,14 @@ class GrootLeRobotWindowDataset:
     def __getitem__(self, sample_index: int) -> dict[str, Any]:
         import torch
 
-        episode_index, frame_index = self._samples[int(sample_index)]
-        length = int(self.episodes[episode_index]["length"])
+        episode_slot, frame_index = self._samples[int(sample_index)]
+        metadata = self.episodes[episode_slot]
+        episode_index = int(metadata["episode_index"])
+        length = int(metadata["length"])
         obs_indices = self._clamped_indices(frame_index - self.obs_horizon + 1, self.obs_horizon, length)
         action_indices = self._clamped_indices(frame_index, self.pred_horizon, length)
         action_is_pad = np.arange(frame_index, frame_index + self.pred_horizon) >= length
-        numeric = self._numeric[episode_index]
+        numeric = self._numeric[episode_slot]
         return {
             STATE_KEY: torch.from_numpy(numeric[STATE_KEY][obs_indices].copy()),
             EGO_KEY: torch.from_numpy(self._read_rgb_frames(episode_index, EGO_KEY, obs_indices)),

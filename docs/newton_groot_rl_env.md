@@ -116,14 +116,27 @@ docker/run_groot_rl_env.sh --num-envs 256 --obs-mode state --no-images --steps 1
 `GrootLeRobotWindowDataset` 直接读取现有 Parquet 和 MP4：
 
 ```python
-from teleop_stack.datasets import GrootLeRobotWindowDataset
+from teleop_stack.datasets import GrootLeRobotWindowDataset, create_groot_lerobot_bc_split
 
-dataset = GrootLeRobotWindowDataset(
+split = create_groot_lerobot_bc_split(
+    "local_data/groot/smooth",
+    validation_fraction=0.1,
+    split_seed=0,
+)
+train_dataset = GrootLeRobotWindowDataset(
     "local_data/groot/smooth",
     obs_horizon=2,
     pred_horizon=16,
+    episode_indices=split.train_episode_indices,
 )
-sample = dataset[0]
+validation_dataset = GrootLeRobotWindowDataset(
+    "local_data/groot/smooth",
+    obs_horizon=2,
+    pred_horizon=16,
+    episode_indices=split.validation_episode_indices,
+    stats=train_dataset.stats,
+)
+sample = train_dataset[0]
 ```
 
 窗口语义为：
@@ -131,8 +144,13 @@ sample = dataset[0]
 - observation：当前帧以及前一帧，episode 起点使用第一帧 padding；
 - action：从当前帧开始的未来 16 个绝对动作，episode 末尾使用最后动作 padding；
 - `action_is_pad`：使 diffusion loss 忽略末尾 padding；
-- 数值数据：启动时读取全部 6,767 帧，体积很小；
+- 数值数据：启动时读取所选 episode 的全部状态和动作，体积相对视频很小；
 - 视频：保持 H.264 压缩，由 DataLoader worker 解码，并通过 pinned memory/non-blocking copy 送入 GPU。
+
+BC split 会先排除 `success != true` 或 `outcome != "success"` 的轨迹，再按
+`raw_episode_id + source_start_frame + source_end_frame` 删除精确重复 clip。不同范围的 clip 会保留，
+但同一 `raw_episode_id` 的所有 clip 一定进入同一个 train 或 validation split，避免相邻真机帧泄漏到两侧。
+Isaac-GR00T 原始目录保持不变，不会物理删除或重编号 episode。
 
 启动离线 DP 行为克隆：
 
@@ -142,10 +160,15 @@ conda_envs/newton/bin/python tools/train_newton_groot_diffusion_policy.py \
   --output-dir checkpoints/dp/groot_l10_pick \
   --batch-size 32 \
   --num-workers 4 \
+  --validation-fraction 0.1 \
+  --split-seed 0 \
+  --validate-every 5000 \
   --steps 100000
 ```
 
 网络包含两个独立 camera encoder、一个 26 维 state encoder 和一个预测 16×19 action noise 的 temporal denoiser。训练、归一化、augmentation 后的 resize、noise scheduler 和 loss 都在 GPU。
+训练目录会写入可审计的 `dataset_split.json`，定期保存 step checkpoint，并把 validation loss 最低的模型保存为
+`best.pt`。归一化统计只从 train split 计算，validation 复用 train 统计。
 
 运行 checkpoint：
 
@@ -172,6 +195,8 @@ conda_envs/newton/bin/python tools/run_newton_groot_dp.py \
 
 ## 当前可训练范围
 
-现有 trainer 是标准离线 Diffusion Policy behavior cloning，可以用 20 个成功 demo 训练一个比 GR00T 小得多的初始化策略，并直接接入 Newton rollout。它还不是奖励驱动的在线 RL 算法。
+现有 trainer 是标准离线 Diffusion Policy behavior cloning。它会使用数据集中所有去重后的成功示教建立
+episode 级 train/validation split，训练一个比 GR00T 小得多的初始化策略，并直接接入 Newton rollout。
+它还不是奖励驱动的在线 RL 算法。
 
 要进行真正的在线 RL 微调，还需要明确选择 DPPO、Diffusion-QL 或“GR00T/成功 rollout 写入 replay 后继续 diffusion BC”的路线，并补齐 replay buffer、advantage/Q loss、策略版本与评估循环。环境、19 维动作、26 维 state、双相机 observation history 和 GPU action-chunk 接口已经为这些训练器准备好；第一版应先验证离线 DP 能稳定完成抬瓶，再增加在线 RL，避免同时排查视觉域差异、IK 和 RL 优化三个问题。
