@@ -1919,6 +1919,7 @@ class Example:
                 reduce_contacts=True,
                 broad_phase="explicit",
                 rigid_contact_max=args.hydroelastic_rigid_contact_max,
+                max_triangle_pairs=args.max_triangle_pairs,
                 sdf_hydroelastic_config=hydroelastic_config,
             )
             self.contacts = self.collision_pipeline.contacts()
@@ -1930,10 +1931,23 @@ class Example:
                 f" narrow_band={tuple(args.hydroelastic_sdf_narrow_band_range)}"
                 f" kh={args.hydroelastic_kh:g}"
                 f" rigid_contact_max={args.hydroelastic_rigid_contact_max}"
+                f" max_triangle_pairs={args.max_triangle_pairs}"
             )
         else:
-            self.contacts = self.model.contacts()
-            print("Hydroelastic contact pipeline: enabled=False")
+            self.collision_pipeline = newton.CollisionPipeline(
+                self.model,
+                reduce_contacts=True,
+                broad_phase="explicit",
+                rigid_contact_max=args.hydroelastic_rigid_contact_max,
+                max_triangle_pairs=args.max_triangle_pairs,
+            )
+            self.contacts = self.collision_pipeline.contacts()
+            print(
+                "Hydroelastic contact pipeline:"
+                " enabled=False"
+                f" rigid_contact_max={args.hydroelastic_rigid_contact_max}"
+                f" max_triangle_pairs={args.max_triangle_pairs}"
+            )
         self.solver = None
         if self.simulate_enabled:
             if args.solver_backend == "mujoco":
@@ -2983,6 +2997,12 @@ class Example:
             type=int,
             default=4096,
             help="Rigid contact capacity for the hydroelastic collision pipeline.",
+        )
+        parser.add_argument(
+            "--max-triangle-pairs",
+            type=int,
+            default=1_000_000,
+            help="Triangle-pair capacity for mesh narrow phase; increase for replicated worlds.",
         )
         parser.add_argument(
             "--rigid-gap",

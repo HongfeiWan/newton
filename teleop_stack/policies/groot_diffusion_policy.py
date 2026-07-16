@@ -246,19 +246,60 @@ class GrootDiffusionPolicy:
                 return loss.mean()
 
             @torch.no_grad()
-            def predict_action(self, observation: dict[str, Any], scheduler: Any, *, inference_steps: int = 10) -> Any:
-                condition = self.encode_observation(observation)
-                sample = torch.randn(
-                    (condition.shape[0], self.config.pred_horizon, self.config.action_dim),
-                    dtype=condition.dtype,
-                    device=condition.device,
-                )
+            def predict_action_from_condition(
+                self,
+                condition: Any,
+                scheduler: Any,
+                *,
+                inference_steps: int = 10,
+                initial_noise: Any | None = None,
+                generator: Any | None = None,
+            ) -> Any:
+                """Decode physical actions from an already encoded observation.
+
+                This lets frozen-policy RL consumers reuse the same visual
+                features for the diffusion baseline, residual actor, and
+                critic without running the image encoders more than once.
+                """
+                expected_shape = (condition.shape[0], self.config.pred_horizon, self.config.action_dim)
+                if initial_noise is None:
+                    sample = torch.randn(
+                        expected_shape,
+                        dtype=condition.dtype,
+                        device=condition.device,
+                        generator=generator,
+                    )
+                else:
+                    if tuple(initial_noise.shape) != expected_shape:
+                        raise ValueError(
+                            f"Expected initial_noise shape {expected_shape}, got {tuple(initial_noise.shape)}"
+                        )
+                    sample = initial_noise.to(device=condition.device, dtype=condition.dtype).clone()
                 scheduler.set_timesteps(inference_steps, device=condition.device)
                 for timestep in scheduler.timesteps:
                     timestep_batch = timestep.expand(condition.shape[0])
                     noise = self.denoiser(sample, timestep_batch, condition)
-                    sample = scheduler.step(noise, timestep, sample).prev_sample
+                    sample = scheduler.step(noise, timestep, sample, generator=generator).prev_sample
                 sample = torch.clamp(sample, -1.0, 1.0)
                 return self._unnormalize(sample, self.action_min, self.action_max)
+
+            @torch.no_grad()
+            def predict_action(
+                self,
+                observation: dict[str, Any],
+                scheduler: Any,
+                *,
+                inference_steps: int = 10,
+                initial_noise: Any | None = None,
+                generator: Any | None = None,
+            ) -> Any:
+                condition = self.encode_observation(observation)
+                return self.predict_action_from_condition(
+                    condition,
+                    scheduler,
+                    inference_steps=inference_steps,
+                    initial_noise=initial_noise,
+                    generator=generator,
+                )
 
         return Policy()

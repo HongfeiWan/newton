@@ -261,10 +261,35 @@ conda_envs/newton/bin/python tools/run_newton_groot_dp.py \
 
 不能把视频文件读取宣称为“全 GPU”。现有远端 smooth 数据已经包含逐帧 mmap cache，训练器不会把约 153 GB 缓存整体载入内存或显存，只依赖 OS page cache 并复制当前 batch。若仍需提高上限，可再接入 NVDEC/DALI 或生成降采样后的训练缓存；不建议把全部原始视频长期常驻显存。
 
-## 当前可训练范围
+## Residual PPO 在线微调
 
-现有 trainer 是标准离线 Diffusion Policy behavior cloning。它会使用数据集中所有去重后的成功示教建立
-episode 级 train/validation split，训练一个比 GR00T 小得多的初始化策略，并直接接入 Newton rollout。
-它还不是奖励驱动的在线 RL 算法。
+`train_newton_groot_residual_ppo.py` 使用已有 DP checkpoint 作为冻结的视觉动作先验，只训练 residual actor 和 critic：
 
-要进行真正的在线 RL 微调，还需要明确选择 DPPO、Diffusion-QL 或“GR00T/成功 rollout 写入 replay 后继续 diffusion BC”的路线，并补齐 replay buffer、advantage/Q loss、策略版本与评估循环。环境、19 维动作、26 维 state、双相机 observation history 和 GPU action-chunk 接口已经为这些训练器准备好；第一版应先验证离线 DP 能稳定完成抓取、搬运与释放，再增加在线 RL，避免同时排查视觉域差异、IK 和 RL 优化三个问题。
+- 每步只运行一次双相机/state encoder，冻结特征同时供 DP denoiser、actor 和 critic 使用；
+- DP 仍预测完整的 `16×19` action chunk，但在线 rollout 固定 `action_horizon=1`；
+- actor 输入冻结特征和本次 DP 基础动作，输出 16 维 residual latent：世界坐标位置 3 维、局部轴角 3 维和手指 10 维；
+- 旋转 residual 在 SO(3) 上组合后重新编码为 row-first Rot6D，不直接加减六个矩阵元素；
+- critic 额外使用 phase、接触、抬升、释放和目标误差等 GPU privileged task state，这些信息不进入 actor；
+- rollout 只保存冻结后的特征、基础动作、latent、value 和 reward，不保存历史 RGB 帧；
+- `terminated` 和固定任务 horizon 的 `truncated` 默认都不 bootstrap，且 GAE 不跨 episode；若将时间限制视为非任务终态，可显式传 `--bootstrap-time-limit` 使用 reset 前的最终 observation value；
+- checkpoint 保存 actor/critic、optimizer、更新计数、DP 文件 SHA-256 和独立 CUDA generator 状态。恢复训练会重新 reset 环境，不承诺物理轨迹逐 bit 延续。
+
+示例：
+
+```bash
+conda_envs/newton/bin/python tools/train_newton_groot_residual_ppo.py \
+  checkpoints/dp/groot_l10_pick/best.pt \
+  --output-dir checkpoints/residual_ppo/groot_l10_transfer \
+  --num-envs 32 \
+  --rollout-steps 64 \
+  --minibatch-size 512 \
+  --inference-steps 6 \
+  --max-episode-steps 300 \
+  --total-timesteps 2000000
+```
+
+默认 residual 上限为位置 `0.015 m`、旋转 `5°`、手指归一化范围 `0.1`。这些限制比并行环境数量更影响训练安全性；扩大 residual 前应先检查 IK 饱和率和瓶子接触稳定性。Residual PPO 默认 episode horizon 为 300 个 10 Hz step，以覆盖现有成功示教中抓取、搬运和释放的主要时长分布。训练使用上面的阶段覆盖 `normalized_dense` reward，成功阶段在固定 horizon 内保持最高奖励，使越早完成任务的回报越高。
+
+网格窄相位的 triangle-pair buffer 默认按每环境 `65,536` 个候选对扩展，并保留至少 `1,000,000` 的容量；因此 32 个并行环境使用 `2,097,152`。一旦日志出现 `Triangle pair buffer overflowed`，该 rollout 的接触与 reward 可能已被截断，不应继续用于训练。
+
+离线 BC trainer 仍只优化 diffusion noise loss；Residual PPO 不修改 DP 权重。若后续需要直接更新 denoiser，仍需单独实现和验证 DPPO 或其他 diffusion RL 目标。

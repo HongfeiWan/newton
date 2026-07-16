@@ -99,6 +99,10 @@ class TestGrootNewtonReward(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "goal_threshold"):
             env_module.GrootNewtonEnvConfig(bottle_lift_height=0.1, goal_threshold=0.1)
 
+    def test_contact_buffer_capacities_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "contact buffer"):
+            env_module.GrootNewtonEnvConfig(triangle_pairs_per_env=0)
+
     def _phase_arrays(self, count: int = 1):
         return {
             "obj_pose": wp.zeros((count, 7), dtype=wp.float32, device=self.device),

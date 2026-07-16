@@ -178,6 +178,7 @@ class GrootNewtonEnvConfig:
     wrist_width: int = 640
     wrist_height: int = 480
     rigid_contacts_per_env: int = 1024
+    triangle_pairs_per_env: int = 65_536
     mujoco_njmax: int = 2048
     mujoco_nconmax: int = 1024
 
@@ -251,6 +252,8 @@ class GrootNewtonEnvConfig:
             raise ValueError("capture_graph requires an even substeps_per_frame so state buffers do not alias")
         if min(self.ego_width, self.ego_height, self.wrist_width, self.wrist_height) < 1:
             raise ValueError("camera dimensions must be positive")
+        if min(self.rigid_contacts_per_env, self.triangle_pairs_per_env) < 1:
+            raise ValueError("contact buffer capacities must be positive")
 
 
 @wp.func
@@ -1002,6 +1005,7 @@ class GrootNewtonEnv:
         args.d405_fov = 72.0
         args.d405_connector_rel_euler = (89.483, -1.020, -2.995)
         args.hydroelastic_rigid_contact_max = self.config.rigid_contacts_per_env * self.num_envs
+        args.max_triangle_pairs = max(1_000_000, self.config.triangle_pairs_per_env * self.num_envs)
         args.mujoco_njmax = self.config.mujoco_njmax
         args.mujoco_nconmax = self.config.mujoco_nconmax
 

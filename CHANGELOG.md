@@ -15,6 +15,7 @@
 - Add user-defined pressure laws to hydroelastic SDF contact via `HydroelasticSDF.Config.pressure_func` (a `@wp.func` mapping `(signed_depth, shape_idx, data) -> pressure`) and `pressure_data` (a `@wp.struct` carrying per-shape state). The contact patch is the iso-pressure surface `p_a == p_b`; the default linear law `pressure = -kh * signed_depth` is preserved when no callback is supplied.
 - Add `SensorTiledCamera.utils.assign_checkerboard_material(shape_indices=...)` for applying the checkerboard texture to selected shapes.
 - Add a GPU-batched Nero + L10 PickBottle environment and dual-camera Diffusion Policy trainer using the existing 26-D LeRobot state, 19-D absolute EEF/hand action, CUDA IK, partial reset, and action-chunk interfaces.
+- Add a residual PPO trainer that freezes the Nero + L10 Diffusion Policy, learns bounded position/SO(3)/hand corrections from staged rewards, and uses GPU privileged task state only in the critic.
 - Add `--render-fps` to cap example rendering rate without changing simulation frame timing
 - Expose `MeshAdjacencyData` (the device-resident soft-mesh adjacency struct returned by `MeshAdjacency.to()`) as public API for use in custom Warp kernels
 - Add `ModelBuilder.BvhConfig` for selecting Warp BVH constructors during model finalization for mesh, Gaussian, and shape BVHs.
@@ -47,6 +48,7 @@
 
 - Fix USD joint `physics:collisionEnabled` import so joints with two explicit bodies honor authored collision behavior; joints to world continue to allow body/world collisions, and articulation-wide self-collision filtering remains additive.
 - Fix the Nero + L10 Diffusion Policy rotation contract to use row-first flange poses, reject stale state-target datasets and checkpoints, and fingerprint numeric training data; retrain policies from physically migrated data.
+- Fix the batched Nero + L10 environment truncating mesh contact candidates by scaling its triangle-pair buffer with the replicated world count.
 - Fix `ViewerFile.is_running()` to return `False` after `ViewerFile.close()` so headless recording loops can terminate like interactive viewers. (#3094)
 - Fix XPBD particle-particle contacts to avoid non-finite particle state for exact-overlap contacts. (#1562)
 - Fix `SolverMuJoCo` dropping the authored `actuator_ctrlrange`/`actuator_ctrllimited`/`actuator_forcerange`/`actuator_forcelimited` when rebuilding USD/MJCF position/velocity actuators imported as `JOINT_TARGET`, so the compiled `mj_model` now clamps control targets and actuator forces like native MuJoCo.
