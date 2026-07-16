@@ -1,6 +1,6 @@
 # Newton Nero + L10 Diffusion Policy 环境
 
-这套环境用于在 Newton/MJWarp 中并行执行“抓住瓶子并向上抬高 0.1 m”。瓶子的初始位置目前固定；第一版策略不使用接触力或 `qfrc_actuator`，只对齐现有 LeRobot 数据集的图像、26 维状态和 19 维绝对动作。
+这套环境用于在 Newton/MJWarp 中并行执行瓶子抓取、搬运和释放任务。机械手必须抓稳瓶子、保持接触将其抬高至少 0.1 m、在 XY 平面移出初始位置、放回接近初始高度并保持初始姿态，最后释放并等待瓶子稳定。瓶子的初始位置目前固定；第一版策略不把接触力或 `qfrc_actuator` 放入 observation，只对齐现有 LeRobot 数据集的图像、26 维状态和 19 维绝对动作。
 
 ## 数据协议
 
@@ -99,6 +99,7 @@ base_env = GrootNewtonEnv(
         obs_mode="policy",
         control_mode="pd_eef_pose_abs",
         bottle_lift_height=0.1,
+        bottle_min_xy_displacement=0.1,
     )
 )
 env = GrootDiffusionPolicyEnv(base_env, obs_horizon=2, action_horizon=8)
@@ -114,6 +115,42 @@ observation, reward, terminated, truncated, info = env.step(physical_action_chun
 
 `reset(options={"env_idx": cuda_indices})` 和 `reset(world_mask=cuda_bool_mask)` 支持局部 reset。状态、reward、终止标志、图像和 history buffer 都留在 GPU。
 
+## 任务阶段、成功条件和 Reward
+
+任务使用每个 world 独立的 GPU 状态机：
+
+```text
+APPROACH → CARRYING → RELEASED → SUCCESS / FAIL
+```
+
+- `APPROACH`：至少两根不同手指连续接触瓶子 2 个 60 Hz 仿真帧后确认抓取。
+- `CARRYING`：每个 60 Hz 仿真帧检查五指所有指节与瓶子的接触；允许单帧数值抖动，连续 2 帧完全无接触才确认释放。只有最后一个仍有接触的帧已经满足抬升和最终位姿约束，释放才有效；瓶子脱手后靠惯性进入目标区会失败。
+- `RELEASED`：释放前必须在有效接触下曾达到 `initial_z + 0.1 m`；释放后重新接触会失败。
+- `SUCCESS`：释放后 XY 相对初始位置的位移至少为 `0.1 m`、Z 误差不超过 `0.01 m`、相对初始姿态的四元数测地角不超过 `15°`，并且瓶子线速度和角速度连续 12 个 60 Hz 帧低于阈值。
+- `FAIL`：搬运已经开始但在达到抬升高度或允许释放位姿前释放，释放后重新接触，或者瓶子稳定后偏离最终位姿范围。
+
+目前没有指定单一目标方向；`bottle_min_xy_displacement` 表示从初始 XY 径向移开至少指定距离。以后增加固定目标区时，应把它替换为目标中心与区域边界，而不是复用抬升目标 `_goal_pos`。
+
+接触仍是 privileged GPU task signal，不进入 26 维 policy state。接触候选会进一步检查几何 separation，默认只接受表面间距不超过 `0.2 mm` 的手指—瓶子 contact；它不是以 N 为单位的 `SensorContact` 力读数。
+
+Dense reward 采用 ManiSkill `StackCube` 风格的阶段覆盖，而不是把所有阶段相加：
+
+```text
+APPROACH:                 R = 2 * r_reach                         # [0, 2]
+CARRYING, 尚未达到高度:   R = 3 + r_lift                          # [3, 4]
+CARRYING, 已达到高度:     R = 4 + r_place                         # [4, 5]
+RELEASED, 最终位姿合格:   R = 6 + r_static                        # [6, 7]
+SUCCESS:                  R = 8
+FAIL:                     R = 0
+normalized_dense:         R / 8
+```
+
+其中 `r_place` 是 XY 位移、最终 Z 和姿态三个 `[0, 1]` shaping 项的平均值。Sparse reward 在成功时为 `+1`，失败时为 `-1`。阶段基线严格递增，使后续阶段覆盖前一阶段；连续接触作为状态机硬条件，不提供可被策略通过永不释放而长期刷取的独立正奖励。
+
+训练默认使用固定 horizon：`terminate_on_success=False`，进入 `SUCCESS` 后每个剩余 step 都保持最高阶段奖励 8，直到 episode 截断；失败仍立即终止。这样越早完成任务回报越高，不会出现一直抓住瓶子领取 4–5 分反而优于释放的激励错配。独立成功率评估如果需要成功后立即 reset，可传 `--terminate-on-success`。
+
+在线 RL rollout 第一版应使用 `action_horizon=1`。当前 action-chunk 接口会完整执行整个 chunk；某个 world 在 chunk 中途失败时，后续动作虽不再计入汇总 reward，仍会推进底层状态，因此不适合作为精确的 terminal transition。离线 DP 推理仍可使用多步 chunk；在线训练若要增大 horizon，需要先实现逐 world 冻结和首次 terminal snapshot。
+
 基础环境 smoke test：
 
 ```bash
@@ -121,6 +158,7 @@ docker/run_groot_rl_env.sh \
   --num-envs 64 \
   --obs-mode policy \
   --control-mode pd_eef_pose_abs \
+  --bottle-min-xy-displacement 0.1 \
   --steps 100
 ```
 
@@ -229,4 +267,4 @@ conda_envs/newton/bin/python tools/run_newton_groot_dp.py \
 episode 级 train/validation split，训练一个比 GR00T 小得多的初始化策略，并直接接入 Newton rollout。
 它还不是奖励驱动的在线 RL 算法。
 
-要进行真正的在线 RL 微调，还需要明确选择 DPPO、Diffusion-QL 或“GR00T/成功 rollout 写入 replay 后继续 diffusion BC”的路线，并补齐 replay buffer、advantage/Q loss、策略版本与评估循环。环境、19 维动作、26 维 state、双相机 observation history 和 GPU action-chunk 接口已经为这些训练器准备好；第一版应先验证离线 DP 能稳定完成抬瓶，再增加在线 RL，避免同时排查视觉域差异、IK 和 RL 优化三个问题。
+要进行真正的在线 RL 微调，还需要明确选择 DPPO、Diffusion-QL 或“GR00T/成功 rollout 写入 replay 后继续 diffusion BC”的路线，并补齐 replay buffer、advantage/Q loss、策略版本与评估循环。环境、19 维动作、26 维 state、双相机 observation history 和 GPU action-chunk 接口已经为这些训练器准备好；第一版应先验证离线 DP 能稳定完成抓取、搬运与释放，再增加在线 RL，避免同时排查视觉域差异、IK 和 RL 优化三个问题。

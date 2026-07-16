@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import time
 
 import warp as wp
@@ -38,6 +39,19 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ik-max-joint-step-rad", type=float, default=0.045)
     parser.add_argument("--hand-max-joint-step-rad", type=float, default=0.08)
     parser.add_argument("--bottle-lift-height", type=float, default=0.1)
+    parser.add_argument("--bottle-min-xy-displacement", type=float, default=0.1)
+    parser.add_argument("--transport-start-distance", type=float, default=0.01)
+    parser.add_argument("--lift-threshold", type=float, default=0.005)
+    parser.add_argument("--final-z-threshold", type=float, default=0.01)
+    parser.add_argument("--final-orientation-threshold-deg", type=float, default=15.0)
+    parser.add_argument("--contact-max-separation", type=float, default=0.0002)
+    parser.add_argument("--grasp-confirm-frames", type=int, default=2)
+    parser.add_argument("--release-confirm-frames", type=int, default=2)
+    parser.add_argument("--settle-confirm-frames", type=int, default=12)
+    parser.add_argument("--object-linear-velocity-threshold", type=float, default=0.02)
+    parser.add_argument("--object-angular-velocity-threshold", type=float, default=0.5)
+    parser.add_argument("--terminate-on-success", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--terminate-on-fail", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ego-width", type=int, default=320)
     parser.add_argument("--ego-height", type=int, default=180)
     parser.add_argument("--wrist-width", type=int, default=640)
@@ -72,6 +86,19 @@ def main() -> None:
         ik_max_joint_step_rad=args.ik_max_joint_step_rad,
         hand_max_joint_step_rad=args.hand_max_joint_step_rad,
         bottle_lift_height=args.bottle_lift_height,
+        bottle_min_xy_displacement=args.bottle_min_xy_displacement,
+        transport_start_distance=args.transport_start_distance,
+        goal_threshold=args.lift_threshold,
+        final_z_threshold=args.final_z_threshold,
+        final_orientation_threshold_rad=math.radians(args.final_orientation_threshold_deg),
+        contact_max_separation=args.contact_max_separation,
+        grasp_confirm_frames=args.grasp_confirm_frames,
+        release_confirm_frames=args.release_confirm_frames,
+        settle_confirm_frames=args.settle_confirm_frames,
+        object_linear_velocity_threshold=args.object_linear_velocity_threshold,
+        object_angular_velocity_threshold=args.object_angular_velocity_threshold,
+        terminate_on_success=args.terminate_on_success,
+        terminate_on_fail=args.terminate_on_fail,
         capture_graph=not args.no_capture_graph,
         render_images=not args.no_images,
         camera_textures=not args.no_camera_textures,

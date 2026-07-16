@@ -64,6 +64,13 @@ _REWARD_MODE_IDS = {
     "normalized_dense": _REWARD_MODE_NORMALIZED_DENSE,
 }
 
+_TASK_PHASE_APPROACH = 0
+_TASK_PHASE_CARRYING = 1
+_TASK_PHASE_RELEASED = 2
+_TASK_PHASE_SUCCESS = 3
+_TASK_PHASE_FAIL = 4
+_STAGE_REWARD_MAX = 8.0
+
 _OBS_MODES = {"state", "state_dict", "rgb", "state_dict+rgb", "policy"}
 _FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
 
@@ -146,10 +153,21 @@ class GrootNewtonEnvConfig:
     hand_max_joint_step_rad: float = 0.08
     initial_hand_q: tuple[float, ...] = _GROOT_INITIAL_HAND_Q
     bottle_lift_height: float = 0.1
+    bottle_min_xy_displacement: float = 0.1
+    transport_start_distance: float = 0.01
     goal_threshold: float = 0.005
+    final_z_threshold: float = 0.01
+    final_orientation_threshold_rad: float = math.radians(15.0)
+    contact_max_separation: float = 0.0002
     static_velocity_threshold: float = 0.2
+    object_linear_velocity_threshold: float = 0.02
+    object_angular_velocity_threshold: float = 0.5
     grasp_finger_count: int = 2
-    terminate_on_success: bool = True
+    grasp_confirm_frames: int = 2
+    release_confirm_frames: int = 2
+    settle_confirm_frames: int = 12
+    terminate_on_success: bool = False
+    terminate_on_fail: bool = True
     capture_graph: bool = True
     render_images: bool = True
     camera_textures: bool = True
@@ -200,12 +218,35 @@ class GrootNewtonEnvConfig:
             math.isfinite(value) for value in self.initial_hand_q
         ):
             raise ValueError(f"initial_hand_q must contain {len(HAND_JOINT_NAMES)} finite values")
-        if self.bottle_lift_height <= 0.0 or self.goal_threshold <= 0.0:
-            raise ValueError("bottle_lift_height and goal_threshold must be positive")
-        if self.static_velocity_threshold <= 0.0:
-            raise ValueError("static_velocity_threshold must be positive")
+        if (
+            min(
+                self.bottle_lift_height,
+                self.bottle_min_xy_displacement,
+                self.transport_start_distance,
+                self.goal_threshold,
+                self.final_z_threshold,
+                self.final_orientation_threshold_rad,
+            )
+            <= 0.0
+        ):
+            raise ValueError("task distances, thresholds, and orientation tolerance must be positive")
+        if self.goal_threshold >= self.bottle_lift_height:
+            raise ValueError("goal_threshold must be smaller than bottle_lift_height")
+        if self.contact_max_separation < 0.0:
+            raise ValueError("contact_max_separation cannot be negative")
+        if (
+            min(
+                self.static_velocity_threshold,
+                self.object_linear_velocity_threshold,
+                self.object_angular_velocity_threshold,
+            )
+            <= 0.0
+        ):
+            raise ValueError("velocity thresholds must be positive")
         if self.grasp_finger_count < 1 or self.grasp_finger_count > len(_FINGER_NAMES):
             raise ValueError(f"grasp_finger_count must be in [1, {len(_FINGER_NAMES)}]")
+        if min(self.grasp_confirm_frames, self.release_confirm_frames, self.settle_confirm_frames) < 1:
+            raise ValueError("task confirmation frame counts must be positive")
         if self.capture_graph and self.substeps_per_frame % 2 != 0:
             raise ValueError("capture_graph requires an even substeps_per_frame so state buffers do not alias")
         if min(self.ego_width, self.ego_height, self.wrist_width, self.wrist_height) < 1:
@@ -371,13 +412,25 @@ def _initialize_task_goal(
     lift_height: wp.float32,
     world_mask: wp.array[wp.bool],
     goal_pos: wp.array2d[wp.float32],
+    initial_obj_pose: wp.array2d[wp.float32],
+    max_bottle_z: wp.array[wp.float32],
 ):
     world = wp.tid()
     if not world_mask or world_mask[world]:
-        position = wp.transform_get_translation(body_q[body_world_start[world] + bottle_local_body])
+        transform = body_q[body_world_start[world] + bottle_local_body]
+        position = wp.transform_get_translation(transform)
+        rotation = wp.transform_get_rotation(transform)
         goal_pos[world, 0] = position[0]
         goal_pos[world, 1] = position[1]
         goal_pos[world, 2] = position[2] + lift_height
+        initial_obj_pose[world, 0] = position[0]
+        initial_obj_pose[world, 1] = position[1]
+        initial_obj_pose[world, 2] = position[2]
+        initial_obj_pose[world, 3] = rotation[0]
+        initial_obj_pose[world, 4] = rotation[1]
+        initial_obj_pose[world, 5] = rotation[2]
+        initial_obj_pose[world, 6] = rotation[3]
+        max_bottle_z[world] = position[2]
 
 
 @wp.kernel(enable_backward=False)
@@ -385,9 +438,17 @@ def _accumulate_hand_bottle_contacts(
     contact_count: wp.array[wp.int32],
     contact_shape0: wp.array[wp.int32],
     contact_shape1: wp.array[wp.int32],
+    contact_point0: wp.array[wp.vec3],
+    contact_point1: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    contact_margin0: wp.array[wp.float32],
+    contact_margin1: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    shape_body: wp.array[wp.int32],
     shape_world: wp.array[wp.int32],
     shape_finger: wp.array[wp.int32],
     shape_is_bottle: wp.array[wp.int32],
+    max_separation: wp.float32,
     finger_contacts: wp.array2d[wp.int32],
 ):
     contact = wp.tid()
@@ -399,14 +460,31 @@ def _accumulate_hand_bottle_contacts(
         return
 
     finger = int(-1)
+    finger_shape = int(-1)
     world = int(-1)
     if shape_is_bottle[shape0] != 0 and shape_finger[shape1] >= 0:
         finger = shape_finger[shape1]
+        finger_shape = shape1
         world = shape_world[shape0]
     elif shape_is_bottle[shape1] != 0 and shape_finger[shape0] >= 0:
         finger = shape_finger[shape0]
+        finger_shape = shape0
         world = shape_world[shape1]
-    if world >= 0 and finger >= 0:
+    if world < 0 or finger < 0:
+        return
+    if shape_world[finger_shape] != world:
+        return
+
+    body0 = shape_body[shape0]
+    body1 = shape_body[shape1]
+    point0 = contact_point0[contact]
+    point1 = contact_point1[contact]
+    if body0 >= 0:
+        point0 = wp.transform_point(body_q[body0], point0)
+    if body1 >= 0:
+        point1 = wp.transform_point(body_q[body1], point1)
+    separation = wp.dot(contact_normal[contact], point1 - point0) - contact_margin0[contact] - contact_margin1[contact]
+    if separation <= max_separation:
         wp.atomic_add(finger_contacts, world, finger, 1)
 
 
@@ -421,7 +499,7 @@ def _clear_finger_contact_rows(
 
 
 @wp.kernel(enable_backward=False)
-def _evaluate_pick_bottle(
+def _evaluate_transfer_bottle(
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
     body_world_start: wp.array[wp.int32],
@@ -430,22 +508,39 @@ def _evaluate_pick_bottle(
     fingertip_local_bodies: wp.array[wp.int32],
     finger_contacts: wp.array2d[wp.int32],
     goal_pos: wp.array2d[wp.float32],
+    initial_obj_pose: wp.array2d[wp.float32],
+    task_phase: wp.array[wp.int32],
+    reached_lift_height: wp.array[wp.bool],
     joint_qd: wp.array[wp.float32],
     joint_dof_world_start: wp.array[wp.int32],
     action_local_qd: wp.array[wp.int32],
-    goal_threshold: wp.float32,
+    min_xy_displacement: wp.float32,
+    final_z_threshold: wp.float32,
+    final_orientation_threshold: wp.float32,
     static_velocity_threshold: wp.float32,
+    object_linear_velocity_threshold: wp.float32,
+    object_angular_velocity_threshold: wp.float32,
     grasp_finger_count: wp.int32,
     obj_pose: wp.array2d[wp.float32],
     tcp_pose: wp.array2d[wp.float32],
     tcp_to_obj: wp.array2d[wp.float32],
     obj_to_goal: wp.array2d[wp.float32],
+    touching_finger_count: wp.array[wp.int32],
+    has_hand_contact: wp.array[wp.bool],
     is_grasped: wp.array[wp.bool],
+    placement_pose_valid: wp.array[wp.bool],
+    release_ready: wp.array[wp.bool],
     is_obj_placed: wp.array[wp.bool],
+    is_obj_static: wp.array[wp.bool],
     is_robot_static: wp.array[wp.bool],
-    success: wp.array[wp.bool],
+    xy_displacement: wp.array[wp.float32],
+    final_z_error: wp.array[wp.float32],
+    orientation_error: wp.array[wp.float32],
     reaching_reward: wp.array[wp.float32],
+    lift_reward: wp.array[wp.float32],
+    transport_reward: wp.array[wp.float32],
     place_reward: wp.array[wp.float32],
+    orientation_reward: wp.array[wp.float32],
     static_reward: wp.array[wp.float32],
 ):
     world = wp.tid()
@@ -491,25 +586,199 @@ def _evaluate_pick_bottle(
         if finger_contacts[world, finger] > 0:
             touching_fingers = touching_fingers + 1
     grasped = touching_fingers >= grasp_finger_count
+    hand_contact = touching_fingers > 0
     lift_remaining = wp.max(goal_pos[world, 2] - bottle_position[2], 0.0)
-    lifted = lift_remaining <= goal_threshold
 
-    velocity_sq = float(0.0)
+    initial_dx = bottle_position[0] - initial_obj_pose[world, 0]
+    initial_dy = bottle_position[1] - initial_obj_pose[world, 1]
+    xy_distance = wp.sqrt(initial_dx * initial_dx + initial_dy * initial_dy)
+    z_error = wp.abs(bottle_position[2] - initial_obj_pose[world, 2])
+    quat_dot = wp.abs(
+        bottle_rotation[0] * initial_obj_pose[world, 3]
+        + bottle_rotation[1] * initial_obj_pose[world, 4]
+        + bottle_rotation[2] * initial_obj_pose[world, 5]
+        + bottle_rotation[3] * initial_obj_pose[world, 6]
+    )
+    angle_error = 2.0 * wp.acos(wp.clamp(quat_dot, 0.0, 1.0))
+    pose_valid = (
+        xy_distance >= min_xy_displacement
+        and z_error <= final_z_threshold
+        and angle_error <= final_orientation_threshold
+    )
+
+    robot_max_speed = float(0.0)
     qd_start = joint_dof_world_start[world]
     for joint in range(JOINT_ACTION_SIZE):
-        velocity = joint_qd[qd_start + action_local_qd[joint]]
-        velocity_sq = velocity_sq + velocity * velocity
+        robot_max_speed = wp.max(robot_max_speed, wp.abs(joint_qd[qd_start + action_local_qd[joint]]))
     bottle_linear_velocity = wp.spatial_top(body_qd[body_start + bottle_local_body])
-    velocity_sq = velocity_sq + wp.dot(bottle_linear_velocity, bottle_linear_velocity)
-    static = wp.sqrt(velocity_sq) <= static_velocity_threshold
+    bottle_angular_velocity = wp.spatial_bottom(body_qd[body_start + bottle_local_body])
+    linear_speed = wp.length(bottle_linear_velocity)
+    angular_speed = wp.length(bottle_angular_velocity)
+    object_static = (
+        linear_speed <= object_linear_velocity_threshold and angular_speed <= object_angular_velocity_threshold
+    )
+    robot_static = robot_max_speed <= static_velocity_threshold
 
+    xy_remaining = wp.max(min_xy_displacement - xy_distance, 0.0)
+    xy_reward = 1.0 - wp.tanh(10.0 * xy_remaining)
+    z_reward = 1.0 - wp.tanh(20.0 * z_error)
+    rotation_reward = 1.0 - wp.tanh(2.0 * angle_error)
+    placement_reward = (xy_reward + z_reward + rotation_reward) / 3.0
+    phase = task_phase[world]
+    released_or_success = phase == wp.static(_TASK_PHASE_RELEASED) or phase == wp.static(_TASK_PHASE_SUCCESS)
+
+    touching_finger_count[world] = touching_fingers
+    has_hand_contact[world] = hand_contact
     is_grasped[world] = grasped
-    is_obj_placed[world] = lifted
-    is_robot_static[world] = static
-    success[world] = lifted
+    placement_pose_valid[world] = pose_valid
+    release_ready[world] = (
+        phase == wp.static(_TASK_PHASE_CARRYING) and reached_lift_height[world] and pose_valid and hand_contact
+    )
+    is_obj_placed[world] = released_or_success and pose_valid and not hand_contact
+    is_obj_static[world] = object_static
+    is_robot_static[world] = robot_static
+    xy_displacement[world] = xy_distance
+    final_z_error[world] = z_error
+    orientation_error[world] = angle_error
     reaching_reward[world] = 1.0 - wp.tanh(5.0 * wp.length(tcp_delta))
-    place_reward[world] = 1.0 - wp.tanh(10.0 * lift_remaining)
-    static_reward[world] = 1.0 - wp.tanh(5.0 * wp.sqrt(velocity_sq))
+    lift_reward[world] = 1.0 - wp.tanh(10.0 * lift_remaining)
+    transport_reward[world] = xy_reward
+    place_reward[world] = placement_reward
+    orientation_reward[world] = rotation_reward
+    static_reward[world] = 1.0 - wp.tanh(10.0 * linear_speed + angular_speed)
+
+
+@wp.kernel(enable_backward=False)
+def _advance_transfer_phase(
+    obj_pose: wp.array2d[wp.float32],
+    initial_obj_pose: wp.array2d[wp.float32],
+    is_grasped: wp.array[wp.bool],
+    has_hand_contact: wp.array[wp.bool],
+    placement_pose_valid: wp.array[wp.bool],
+    is_obj_static: wp.array[wp.bool],
+    lift_height: wp.float32,
+    lift_threshold: wp.float32,
+    transport_start_distance: wp.float32,
+    grasp_confirm_frames: wp.int32,
+    release_confirm_frames: wp.int32,
+    settle_confirm_frames: wp.int32,
+    task_phase: wp.array[wp.int32],
+    grasp_contact_frames: wp.array[wp.int32],
+    contact_gap_frames: wp.array[wp.int32],
+    settle_frames: wp.array[wp.int32],
+    grasp_confirmed: wp.array[wp.bool],
+    transport_started: wp.array[wp.bool],
+    reached_lift_height: wp.array[wp.bool],
+    release_armed: wp.array[wp.bool],
+    released: wp.array[wp.bool],
+    early_release: wp.array[wp.bool],
+    max_bottle_z: wp.array[wp.float32],
+    success: wp.array[wp.bool],
+    fail: wp.array[wp.bool],
+):
+    world = wp.tid()
+    if success[world] or fail[world]:
+        return
+
+    phase = task_phase[world]
+    if phase == wp.static(_TASK_PHASE_APPROACH):
+        if is_grasped[world]:
+            grasp_contact_frames[world] = grasp_contact_frames[world] + 1
+            if grasp_contact_frames[world] >= grasp_confirm_frames:
+                grasp_confirmed[world] = True
+                contact_gap_frames[world] = 0
+                task_phase[world] = wp.static(_TASK_PHASE_CARRYING)
+        else:
+            grasp_contact_frames[world] = 0
+        return
+
+    if phase == wp.static(_TASK_PHASE_CARRYING):
+        dx = obj_pose[world, 0] - initial_obj_pose[world, 0]
+        dy = obj_pose[world, 1] - initial_obj_pose[world, 1]
+        dz = obj_pose[world, 2] - initial_obj_pose[world, 2]
+        moved = wp.sqrt(dx * dx + dy * dy + dz * dz) >= transport_start_distance
+        if has_hand_contact[world]:
+            contact_gap_frames[world] = 0
+            if moved:
+                transport_started[world] = True
+            if transport_started[world]:
+                max_bottle_z[world] = wp.max(max_bottle_z[world], obj_pose[world, 2])
+                if max_bottle_z[world] >= initial_obj_pose[world, 2] + lift_height - lift_threshold:
+                    reached_lift_height[world] = True
+            # Only the final contacted pose can authorize release. Keep this
+            # value through the short no-contact debounce window.
+            release_armed[world] = reached_lift_height[world] and placement_pose_valid[world]
+            return
+
+        contact_gap_frames[world] = contact_gap_frames[world] + 1
+        if contact_gap_frames[world] < release_confirm_frames:
+            return
+        if not transport_started[world]:
+            task_phase[world] = wp.static(_TASK_PHASE_APPROACH)
+            grasp_contact_frames[world] = 0
+            contact_gap_frames[world] = 0
+            grasp_confirmed[world] = False
+            release_armed[world] = False
+            return
+
+        released[world] = True
+        if not release_armed[world]:
+            early_release[world] = True
+            fail[world] = True
+            task_phase[world] = wp.static(_TASK_PHASE_FAIL)
+            return
+        settle_frames[world] = 0
+        task_phase[world] = wp.static(_TASK_PHASE_RELEASED)
+        return
+
+    if phase == wp.static(_TASK_PHASE_RELEASED):
+        if has_hand_contact[world]:
+            fail[world] = True
+            task_phase[world] = wp.static(_TASK_PHASE_FAIL)
+            return
+        if is_obj_static[world]:
+            settle_frames[world] = settle_frames[world] + 1
+        else:
+            settle_frames[world] = 0
+        if settle_frames[world] >= settle_confirm_frames:
+            if placement_pose_valid[world]:
+                success[world] = True
+                task_phase[world] = wp.static(_TASK_PHASE_SUCCESS)
+            else:
+                fail[world] = True
+                task_phase[world] = wp.static(_TASK_PHASE_FAIL)
+
+
+@wp.kernel(enable_backward=False)
+def _reset_transfer_task(
+    world_mask: wp.array[wp.bool],
+    task_phase: wp.array[wp.int32],
+    grasp_contact_frames: wp.array[wp.int32],
+    contact_gap_frames: wp.array[wp.int32],
+    settle_frames: wp.array[wp.int32],
+    grasp_confirmed: wp.array[wp.bool],
+    transport_started: wp.array[wp.bool],
+    reached_lift_height: wp.array[wp.bool],
+    release_armed: wp.array[wp.bool],
+    released: wp.array[wp.bool],
+    early_release: wp.array[wp.bool],
+    success: wp.array[wp.bool],
+    fail: wp.array[wp.bool],
+):
+    world = wp.tid()
+    if not world_mask or world_mask[world]:
+        task_phase[world] = wp.static(_TASK_PHASE_APPROACH)
+        grasp_contact_frames[world] = 0
+        contact_gap_frames[world] = 0
+        settle_frames[world] = 0
+        grasp_confirmed[world] = False
+        transport_started[world] = False
+        reached_lift_height[world] = False
+        release_armed[world] = False
+        released[world] = False
+        early_release[world] = False
+        success[world] = False
+        fail[world] = False
 
 
 @wp.kernel(enable_backward=False)
@@ -565,11 +834,14 @@ def _advance_episode(
     episode_return: wp.array[wp.float32],
     success_once: wp.array[wp.bool],
     reaching_reward: wp.array[wp.float32],
+    lift_reward: wp.array[wp.float32],
     place_reward: wp.array[wp.float32],
     static_reward: wp.array[wp.float32],
-    is_grasped: wp.array[wp.bool],
+    task_phase: wp.array[wp.int32],
+    reached_lift_height: wp.array[wp.bool],
     is_obj_placed: wp.array[wp.bool],
     success: wp.array[wp.bool],
+    fail: wp.array[wp.bool],
     dense_reward: wp.array[wp.float32],
     reward: wp.array[wp.float32],
     terminated: wp.array[wp.bool],
@@ -577,30 +849,41 @@ def _advance_episode(
     max_episode_steps: wp.int32,
     reward_mode: wp.int32,
     terminate_on_success: wp.bool,
+    terminate_on_fail: wp.bool,
 ):
     world = wp.tid()
     episode_step[world] = episode_step[world] + 1
-    dense = reaching_reward[world]
-    if is_grasped[world]:
-        dense = dense + 1.0 + place_reward[world]
-    if is_obj_placed[world]:
-        dense = dense + static_reward[world]
+    dense = 2.0 * reaching_reward[world]
+    phase = task_phase[world]
+    if phase == wp.static(_TASK_PHASE_CARRYING):
+        if reached_lift_height[world]:
+            dense = 4.0 + place_reward[world]
+        else:
+            dense = 3.0 + lift_reward[world]
+    elif phase == wp.static(_TASK_PHASE_RELEASED):
+        dense = 0.0
+        if is_obj_placed[world]:
+            dense = 6.0 + static_reward[world]
     if success[world]:
-        dense = 5.0
+        dense = wp.static(_STAGE_REWARD_MAX)
+    elif fail[world]:
+        dense = 0.0
     dense_reward[world] = dense
 
     value = float(0.0)
     if reward_mode == wp.static(_REWARD_MODE_SPARSE):
         if success[world]:
             value = 1.0
+        elif fail[world]:
+            value = -1.0
     elif reward_mode == wp.static(_REWARD_MODE_DENSE):
         value = dense
     elif reward_mode == wp.static(_REWARD_MODE_NORMALIZED_DENSE):
-        value = dense / 5.0
+        value = dense / wp.static(_STAGE_REWARD_MAX)
     reward[world] = value
     episode_return[world] = episode_return[world] + value
     success_once[world] = success_once[world] or success[world]
-    terminated[world] = terminate_on_success and success[world]
+    terminated[world] = (terminate_on_success and success[world]) or (terminate_on_fail and fail[world])
     truncated[world] = max_episode_steps > 0 and episode_step[world] >= max_episode_steps
 
 
@@ -1064,18 +1347,41 @@ class GrootNewtonEnv:
 
     def _setup_task_arrays(self) -> None:
         self._goal_pos = wp.zeros((self.num_envs, 3), dtype=wp.float32, device=self.device)
+        self._initial_obj_pose = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
         self._obj_pose = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
         self._tcp_pose = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
         self._tcp_to_obj = wp.zeros((self.num_envs, 3), dtype=wp.float32, device=self.device)
         self._obj_to_goal = wp.zeros((self.num_envs, 3), dtype=wp.float32, device=self.device)
         self._finger_contacts = wp.zeros((self.num_envs, len(_FINGER_NAMES)), dtype=wp.int32, device=self.device)
+        self._task_phase = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._touching_finger_count = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._grasp_contact_frames = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._contact_gap_frames = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._settle_frames = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._has_hand_contact = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._is_grasped = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._grasp_confirmed = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._transport_started = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._reached_lift_height = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._release_armed = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._released = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._early_release = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._placement_pose_valid = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._release_ready = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._is_obj_placed = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._is_obj_static = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._is_robot_static = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._success = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._fail = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._max_bottle_z = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._xy_displacement = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._final_z_error = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._orientation_error = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._reaching_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._lift_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._transport_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._place_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._orientation_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._static_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._dense_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
 
@@ -1359,36 +1665,48 @@ class GrootNewtonEnv:
                 self.config.bottle_lift_height,
                 world_mask,
                 self._goal_pos,
+                self._initial_obj_pose,
+                self._max_bottle_z,
             ],
             device=self.device,
         )
 
-    def _refresh_task_state(self, *, read_contacts: bool, reset_mask: wp.array | None = None) -> None:
-        if read_contacts:
-            self._finger_contacts.zero_()
-            wp.launch(
-                _accumulate_hand_bottle_contacts,
-                dim=self.contacts.rigid_contact_max,
-                inputs=[
-                    self.contacts.rigid_contact_count,
-                    self.contacts.rigid_contact_shape0,
-                    self.contacts.rigid_contact_shape1,
-                    self._shape_world,
-                    self._shape_finger,
-                    self._shape_is_bottle,
-                    self._finger_contacts,
-                ],
-                device=self.device,
-            )
-        else:
-            wp.launch(
-                _clear_finger_contact_rows,
-                dim=(self.num_envs, len(_FINGER_NAMES)),
-                inputs=[reset_mask, self._finger_contacts],
-                device=self.device,
-            )
+    def _clear_finger_contacts(self, world_mask: wp.array | None) -> None:
         wp.launch(
-            _evaluate_pick_bottle,
+            _clear_finger_contact_rows,
+            dim=(self.num_envs, len(_FINGER_NAMES)),
+            inputs=[world_mask, self._finger_contacts],
+            device=self.device,
+        )
+
+    def _collect_finger_contacts(self) -> None:
+        self._finger_contacts.zero_()
+        wp.launch(
+            _accumulate_hand_bottle_contacts,
+            dim=self.contacts.rigid_contact_max,
+            inputs=[
+                self.contacts.rigid_contact_count,
+                self.contacts.rigid_contact_shape0,
+                self.contacts.rigid_contact_shape1,
+                self.contacts.rigid_contact_point0,
+                self.contacts.rigid_contact_point1,
+                self.contacts.rigid_contact_normal,
+                self.contacts.rigid_contact_margin0,
+                self.contacts.rigid_contact_margin1,
+                self.state_0.body_q,
+                self.model.shape_body,
+                self._shape_world,
+                self._shape_finger,
+                self._shape_is_bottle,
+                self.config.contact_max_separation,
+                self._finger_contacts,
+            ],
+            device=self.device,
+        )
+
+    def _evaluate_task_state(self) -> None:
+        wp.launch(
+            _evaluate_transfer_bottle,
             dim=self.num_envs,
             inputs=[
                 self.state_0.body_q,
@@ -1399,26 +1717,84 @@ class GrootNewtonEnv:
                 self._fingertip_body_locals,
                 self._finger_contacts,
                 self._goal_pos,
+                self._initial_obj_pose,
+                self._task_phase,
+                self._reached_lift_height,
                 self.state_0.joint_qd,
                 self.model.joint_dof_world_start,
                 self._action_local_qd,
-                self.config.goal_threshold,
+                self.config.bottle_min_xy_displacement,
+                self.config.final_z_threshold,
+                self.config.final_orientation_threshold_rad,
                 self.config.static_velocity_threshold,
+                self.config.object_linear_velocity_threshold,
+                self.config.object_angular_velocity_threshold,
                 self.config.grasp_finger_count,
                 self._obj_pose,
                 self._tcp_pose,
                 self._tcp_to_obj,
                 self._obj_to_goal,
+                self._touching_finger_count,
+                self._has_hand_contact,
                 self._is_grasped,
+                self._placement_pose_valid,
+                self._release_ready,
                 self._is_obj_placed,
+                self._is_obj_static,
                 self._is_robot_static,
-                self._success,
+                self._xy_displacement,
+                self._final_z_error,
+                self._orientation_error,
                 self._reaching_reward,
+                self._lift_reward,
+                self._transport_reward,
                 self._place_reward,
+                self._orientation_reward,
                 self._static_reward,
             ],
             device=self.device,
         )
+
+    def _advance_task_phase(self) -> None:
+        wp.launch(
+            _advance_transfer_phase,
+            dim=self.num_envs,
+            inputs=[
+                self._obj_pose,
+                self._initial_obj_pose,
+                self._is_grasped,
+                self._has_hand_contact,
+                self._placement_pose_valid,
+                self._is_obj_static,
+                self.config.bottle_lift_height,
+                self.config.goal_threshold,
+                self.config.transport_start_distance,
+                self.config.grasp_confirm_frames,
+                self.config.release_confirm_frames,
+                self.config.settle_confirm_frames,
+                self._task_phase,
+                self._grasp_contact_frames,
+                self._contact_gap_frames,
+                self._settle_frames,
+                self._grasp_confirmed,
+                self._transport_started,
+                self._reached_lift_height,
+                self._release_armed,
+                self._released,
+                self._early_release,
+                self._max_bottle_z,
+                self._success,
+                self._fail,
+            ],
+            device=self.device,
+        )
+
+    def _refresh_task_state(self, *, read_contacts: bool, reset_mask: wp.array | None = None) -> None:
+        if read_contacts:
+            self._collect_finger_contacts()
+        elif reset_mask is not None:
+            self._clear_finger_contacts(reset_mask)
+        self._evaluate_task_state()
 
     def _refresh_observation(self, *, read_contacts: bool = False, reset_mask: wp.array | None = None) -> None:
         wp.launch(
@@ -1523,10 +1899,23 @@ class GrootNewtonEnv:
         return {
             "success": self._success,
             "fail": self._fail,
+            "task_phase": self._task_phase,
+            "has_hand_contact": self._has_hand_contact,
+            "touching_finger_count": self._touching_finger_count,
             "is_grasped": self._is_grasped,
-            "is_lifted": self._is_obj_placed,
+            "grasp_confirmed": self._grasp_confirmed,
+            "transport_started": self._transport_started,
+            "is_lifted": self._reached_lift_height,
+            "release_armed": self._release_armed,
+            "released": self._released,
+            "early_release": self._early_release,
+            "release_ready": self._release_ready,
             "is_obj_placed": self._is_obj_placed,
+            "is_obj_static": self._is_obj_static,
             "is_robot_static": self._is_robot_static,
+            "xy_displacement": self._xy_displacement,
+            "final_z_error": self._final_z_error,
+            "orientation_error": self._orientation_error,
         }
 
     def evaluate(self) -> dict[str, Any]:
@@ -1534,14 +1923,14 @@ class GrootNewtonEnv:
         return self._to_torch_tree(self.evaluate_warp())
 
     def compute_dense_reward(self, obs: Any = None, action: Any = None, info: Any = None) -> Any:
-        """Return the latest PickBottle dense reward as a CUDA Torch view."""
+        """Return the latest bottle-transfer dense reward as a CUDA Torch view."""
         del obs, action, info
         return wp.to_torch(self._dense_reward)
 
     def compute_normalized_dense_reward(self, obs: Any = None, action: Any = None, info: Any = None) -> Any:
         """Return the latest dense reward normalized to the scale used by PPO."""
         del obs, action, info
-        return wp.to_torch(self._dense_reward) / 5.0
+        return wp.to_torch(self._dense_reward) / _STAGE_REWARD_MAX
 
     def _info_warp(self) -> dict[str, Any]:
         return {
@@ -1552,11 +1941,25 @@ class GrootNewtonEnv:
                 "length": self.episode_step,
                 "success_once": self.success_once,
                 "success_at_end": self._success,
+                "fail_at_end": self._fail,
+                "task_phase": self._task_phase,
+                "grasp_confirmed": self._grasp_confirmed,
+                "reached_lift_height": self._reached_lift_height,
+                "release_armed": self._release_armed,
+                "released": self._released,
+                "early_release": self._early_release,
+                "has_hand_contact_at_end": self._has_hand_contact,
+                "max_bottle_z": self._max_bottle_z,
+                "xy_displacement": self._xy_displacement,
+                "final_z_error": self._final_z_error,
+                "orientation_error": self._orientation_error,
             },
             "reward_components": {
                 "reaching": self._reaching_reward,
-                "lift": self._place_reward,
+                "lift": self._lift_reward,
+                "transport": self._transport_reward,
                 "place": self._place_reward,
+                "orientation": self._orientation_reward,
                 "static": self._static_reward,
                 "dense": self._dense_reward,
             },
@@ -1652,9 +2055,30 @@ class GrootNewtonEnv:
             ],
             device=self.device,
         )
+        wp.launch(
+            _reset_transfer_task,
+            dim=self.num_envs,
+            inputs=[
+                mask_wp,
+                self._task_phase,
+                self._grasp_contact_frames,
+                self._contact_gap_frames,
+                self._settle_frames,
+                self._grasp_confirmed,
+                self._transport_started,
+                self._reached_lift_height,
+                self._release_armed,
+                self._released,
+                self._early_release,
+                self._success,
+                self._fail,
+            ],
+            device=self.device,
+        )
         self._initialize_task_goal(mask_wp)
+        self._clear_finger_contacts(mask_wp)
         self.model.bvh_refit_shapes(self.state_0)
-        self._refresh_observation(read_contacts=False, reset_mask=mask_wp)
+        self._refresh_observation()
         return self.observation_warp(), self._info_warp()
 
     def reset(
@@ -1735,7 +2159,10 @@ class GrootNewtonEnv:
                 wp.capture_launch(self._scene.graph)
             else:
                 self._scene.simulate()
-        self._refresh_observation(read_contacts=True)
+            self._collect_finger_contacts()
+            self._evaluate_task_state()
+            self._advance_task_phase()
+        self._refresh_observation()
         wp.launch(
             _advance_episode,
             dim=self.num_envs,
@@ -1744,11 +2171,14 @@ class GrootNewtonEnv:
                 self.episode_return,
                 self.success_once,
                 self._reaching_reward,
+                self._lift_reward,
                 self._place_reward,
                 self._static_reward,
-                self._is_grasped,
+                self._task_phase,
+                self._reached_lift_height,
                 self._is_obj_placed,
                 self._success,
+                self._fail,
                 self._dense_reward,
                 self.reward,
                 self.terminated,
@@ -1756,6 +2186,7 @@ class GrootNewtonEnv:
                 self.config.max_episode_steps,
                 self._reward_mode_id,
                 self.config.terminate_on_success,
+                self.config.terminate_on_fail,
             ],
             device=self.device,
         )
