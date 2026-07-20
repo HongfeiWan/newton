@@ -52,11 +52,7 @@ class _ConnectionState:
 class QuestVoiceCommandBridgeServer:
     def __init__(self, config: QuestVoiceCommandBridgeConfig):
         self.config = config
-        self._xr_status = (
-            XrTeleopStatusPublisher(config.xr_status_path)
-            if config.enable_xr_status_fallback
-            else None
-        )
+        self._xr_status = XrTeleopStatusPublisher(config.xr_status_path) if config.enable_xr_status_fallback else None
         self._fallback_mode = "ready"
 
     def _build_ssl_context(self) -> ssl.SSLContext | None:
@@ -119,9 +115,7 @@ class QuestVoiceCommandBridgeServer:
     async def _handle_connection(self, websocket) -> None:
         remote = getattr(websocket, "remote_address", None)
         print(f"[quest-voice-bridge] client_connected remote={remote}", flush=True)
-        state = _ConnectionState(
-            recognizer=self._build_recognizer()
-        )
+        state = _ConnectionState(recognizer=self._build_recognizer())
 
         try:
             try:

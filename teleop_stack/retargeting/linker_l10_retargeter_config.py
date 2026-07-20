@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from typing import Literal
-
 
 LinkerL10RetargeterKind = Literal[
     "heuristic",
@@ -26,7 +25,7 @@ class LinkerL10RetargeterConfig:
     limit_profile: LinkerL10LimitProfile = "urdf"
 
     @classmethod
-    def from_env(cls) -> "LinkerL10RetargeterConfig":
+    def from_env(cls) -> LinkerL10RetargeterConfig:
         return cls(
             kind=_parse_kind(os.environ.get("TELEOP_LINKER_L10_RETARGETER", "heuristic")),
             low_pass_alpha=_float_env("TELEOP_LINKER_L10_RETARGETER_LOW_PASS_ALPHA", 0.2),

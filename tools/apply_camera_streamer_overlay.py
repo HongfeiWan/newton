@@ -5,7 +5,6 @@ import argparse
 import shutil
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OVERLAY_ROOT = REPO_ROOT / "tools" / "camera_streamer_overlay"
 

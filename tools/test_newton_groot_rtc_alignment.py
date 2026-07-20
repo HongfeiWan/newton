@@ -4,8 +4,6 @@
 
 """Regression tests for the node0 GR00T conventions used by Newton."""
 
-# ruff: noqa: SLF001
-
 from __future__ import annotations
 
 import tempfile
@@ -51,9 +49,7 @@ class TestNode0GrootAlignment(unittest.TestCase):
         )
         policy_pose = np.eye(4, dtype=np.float64)
         policy_pose[:3, 3] = (0.41, -0.12, 0.73)
-        policy_pose[:3, :3] = np.asarray(
-            groot_runtime.quat_xyzw_to_matrix((0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)))
-        )
+        policy_pose[:3, :3] = np.asarray(groot_runtime.quat_xyzw_to_matrix((0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5))))
 
         world_pose = controller._policy_pose_to_world_pose(policy_pose)
         expected = (

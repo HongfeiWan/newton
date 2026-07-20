@@ -17,7 +17,6 @@ from teleop_stack.teleop.spatial_frames import (
     vector_dot,
 )
 
-
 OpenXrCoordinateAdapterName = Literal["none", "openxr_genesis"]
 
 # OpenXR raw world: +X=wearer right, +Y=up, -Z=wearer front.
@@ -155,16 +154,12 @@ def _replace_frame_axes(
 
 def _matmul(lhs: Matrix3, rhs: Matrix3) -> Matrix3:
     return tuple(
-        tuple(sum(float(lhs[row][k]) * float(rhs[k][col]) for k in range(3)) for col in range(3))
-        for row in range(3)
+        tuple(sum(float(lhs[row][k]) * float(rhs[k][col]) for k in range(3)) for col in range(3)) for row in range(3)
     )  # type: ignore[return-value]
 
 
 def _mat_vec_mul(matrix: Matrix3, vector: Vector3) -> Vector3:
-    return tuple(
-        sum(float(matrix[row][col]) * float(vector[col]) for col in range(3))
-        for row in range(3)
-    )  # type: ignore[return-value]
+    return tuple(sum(float(matrix[row][col]) * float(vector[col]) for col in range(3)) for row in range(3))  # type: ignore[return-value]
 
 
 def _vector_scale(vector: Vector3, scale: float) -> Vector3:

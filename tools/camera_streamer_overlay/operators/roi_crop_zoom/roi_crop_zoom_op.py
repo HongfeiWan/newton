@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import cupy as cp
 import cv2
-from holoscan.core import IOSpec, Operator, OperatorSpec
 import numpy as np
+from holoscan.core import IOSpec, Operator, OperatorSpec
 
 
 class RoiCropZoomOp(Operator):

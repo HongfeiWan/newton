@@ -548,10 +548,14 @@ def _set_initial_arm_pose(
             continue
 
         q_start = builder.joint_q_start[joint_id]
-        q_end = builder.joint_q_start[joint_id + 1] if joint_id + 1 < len(builder.joint_q_start) else len(builder.joint_q)
+        q_end = (
+            builder.joint_q_start[joint_id + 1] if joint_id + 1 < len(builder.joint_q_start) else len(builder.joint_q)
+        )
         qd_start = builder.joint_qd_start[joint_id]
         qd_end = (
-            builder.joint_qd_start[joint_id + 1] if joint_id + 1 < len(builder.joint_qd_start) else len(builder.joint_qd)
+            builder.joint_qd_start[joint_id + 1]
+            if joint_id + 1 < len(builder.joint_qd_start)
+            else len(builder.joint_qd)
         )
         if q_end - q_start != 1:
             print(f"Warning: initial arm pose expected 1 q for {label_suffix}, got {q_end - q_start}")
@@ -959,7 +963,7 @@ def _mesh_texture(mesh) -> np.ndarray | None:
 
 
 def _load_glb_meshes(glb_path: Path, *, label: str) -> list[SceneGlbMesh]:
-    import trimesh  # noqa: PLC0415
+    import trimesh
 
     scene = trimesh.load(glb_path, force="scene")
     meshes: list[SceneGlbMesh] = []
@@ -1340,14 +1344,10 @@ def _enforce_cylinder_above_table_top_kernel(
     local_y = wp.quat_rotate(quat, wp.vec3(0.0, 1.0, 0.0))
     local_z = wp.quat_rotate(quat, wp.vec3(0.0, 0.0, 1.0))
     half_x = (
-        wp.abs(local_x[0]) * half_extent_x
-        + wp.abs(local_y[0]) * half_extent_y
-        + wp.abs(local_z[0]) * half_extent_z
+        wp.abs(local_x[0]) * half_extent_x + wp.abs(local_y[0]) * half_extent_y + wp.abs(local_z[0]) * half_extent_z
     )
     half_y = (
-        wp.abs(local_x[1]) * half_extent_x
-        + wp.abs(local_y[1]) * half_extent_y
-        + wp.abs(local_z[1]) * half_extent_z
+        wp.abs(local_x[1]) * half_extent_x + wp.abs(local_y[1]) * half_extent_y + wp.abs(local_z[1]) * half_extent_z
     )
     if pos[0] < table_min_x - half_x or pos[0] > table_max_x + half_x:
         return
@@ -1355,9 +1355,7 @@ def _enforce_cylinder_above_table_top_kernel(
         return
 
     vertical_half = (
-        wp.abs(local_x[2]) * half_extent_x
-        + wp.abs(local_y[2]) * half_extent_y
-        + wp.abs(local_z[2]) * half_extent_z
+        wp.abs(local_x[2]) * half_extent_x + wp.abs(local_y[2]) * half_extent_y + wp.abs(local_z[2]) * half_extent_z
     )
     min_bottom_z = table_top_z + clearance
     bottom_z = pos[2] - vertical_half
@@ -1601,7 +1599,9 @@ class Example:
         self.dynamic_bottle_handles: dict[str, object] | None = None
         self.d455_preview_enabled = args.d455_preview
         self.d405_preview_enabled = args.d405_preview
-        self.d405_connector_rel_pos, self.d405_connector_rel_euler, self.d405_mount_source = _resolve_d405_mount_args(args)
+        self.d405_connector_rel_pos, self.d405_connector_rel_euler, self.d405_mount_source = _resolve_d405_mount_args(
+            args
+        )
         self.d455_body_size = tuple(float(v) for v in _load_d455_config(args.d455_json)["body_size"])
         self.d405_body_size = tuple(float(v) for v in _load_d405_config(args.d405_json)["body_size"])
         self.d455_image_size = tuple(int(v) for v in args.d455_image_size)
@@ -1858,13 +1858,17 @@ class Example:
                 )
             if dynamic_object_proxy is not None:
                 half_extents = dynamic_object_proxy.half_extents
-                visual_text = str(dynamic_object_proxy.visual_glb) if dynamic_object_proxy.visual_glb is not None else "box"
+                visual_text = (
+                    str(dynamic_object_proxy.visual_glb) if dynamic_object_proxy.visual_glb is not None else "box"
+                )
                 radius_text = (
                     f" radius={dynamic_object_proxy.radius:g}"
                     if dynamic_object_proxy.radius is not None
                     else f" size={[2.0 * float(v) for v in half_extents]}"
                 )
-                height_text = f" height={dynamic_object_proxy.height:g}" if dynamic_object_proxy.height is not None else ""
+                height_text = (
+                    f" height={dynamic_object_proxy.height:g}" if dynamic_object_proxy.height is not None else ""
+                )
                 print(
                     "Loaded dynamic object:"
                     f" shape={dynamic_object_proxy.shape}"
@@ -2077,9 +2081,7 @@ class Example:
         joint_target_q = wp.array(self._initial_joint_target_q.copy(), dtype=wp.float32, device=self.model.device)
         joint_target_qd = wp.array(self._initial_joint_target_qd.copy(), dtype=wp.float32, device=self.model.device)
         model_body_q = wp.array(self._initial_model_body_q.copy(), dtype=wp.transform, device=self.model.device)
-        model_body_qd = wp.array(
-            self._initial_model_body_qd.copy(), dtype=wp.spatial_vector, device=self.model.device
-        )
+        model_body_qd = wp.array(self._initial_model_body_qd.copy(), dtype=wp.spatial_vector, device=self.model.device)
         body_q = wp.array(self._initial_body_q.copy(), dtype=wp.transform, device=self.model.device)
         body_qd = wp.array(self._initial_body_qd.copy(), dtype=wp.spatial_vector, device=self.model.device)
 
@@ -2103,7 +2105,9 @@ class Example:
         self.control.clear(self.model)
         wp.copy(self.control.joint_target_q, joint_target_q)
         wp.copy(self.control.joint_target_qd, joint_target_qd)
-        self.contacts = self.collision_pipeline.contacts() if self.collision_pipeline is not None else self.model.contacts()
+        self.contacts = (
+            self.collision_pipeline.contacts() if self.collision_pipeline is not None else self.model.contacts()
+        )
         self.model.bvh_refit_shapes(self.state_0)
         if self.model.particle_count:
             self.model.bvh_refit_particles(self.state_0)
@@ -2182,8 +2186,7 @@ class Example:
     def _log_l10_bottle_contacts(self) -> None:
         log_file = self._l10_bottle_contact_log_file
         should_write_log = (
-            log_file is not None
-            and self._l10_bottle_contact_frame % self._l10_bottle_contact_log_stride == 0
+            log_file is not None and self._l10_bottle_contact_frame % self._l10_bottle_contact_log_stride == 0
         )
         if not should_write_log:
             self._l10_bottle_contact_frame += 1
@@ -2239,8 +2242,12 @@ class Example:
             penetration_m = max(0.0, -separation_m)
 
             if should_write_log:
-                surface0_world = _transform_point_from_body_q(body_q, body0, point0[contact_index] + offset0[contact_index])
-                surface1_world = _transform_point_from_body_q(body_q, body1, point1[contact_index] + offset1[contact_index])
+                surface0_world = _transform_point_from_body_q(
+                    body_q, body0, point0[contact_index] + offset0[contact_index]
+                )
+                surface1_world = _transform_point_from_body_q(
+                    body_q, body1, point1[contact_index] + offset1[contact_index]
+                )
                 records.append(
                     {
                         "contact_index": int(contact_index),
@@ -2365,8 +2372,8 @@ class Example:
         self.sim_time += self.frame_dt
 
     def setup_quest_teleop(self, args) -> None:
-        from teleop_stack.robots.newton_runtime import NewtonRuntimeRobotConfig, NewtonRuntimeRobotInterface
         from teleop_stack.robots.nero_runtime import NeroTeleopMappingConfig
+        from teleop_stack.robots.newton_runtime import NewtonRuntimeRobotConfig, NewtonRuntimeRobotInterface
         from teleop_stack.session.overlay_hand_log_session import OverlayHandLogSession, OverlayHandLogSessionConfig
         from teleop_stack.session.quest_session import QuestRobotSession, QuestRobotSessionConfig
         from teleop_stack.session.voice_controls import VoiceTeleopControlConfig, VoiceTeleopControlPolicy
@@ -2594,10 +2601,7 @@ class Example:
             self.direct_gpu_xr_bridge = None
 
     def render(self) -> None:
-        if (
-            self.camera_preview_fps <= 0.0
-            or self.sim_time + 1.0e-9 >= self._next_camera_preview_time_s
-        ):
+        if self.camera_preview_fps <= 0.0 or self.sim_time + 1.0e-9 >= self._next_camera_preview_time_s:
             self.render_camera_previews()
             if self.camera_preview_fps > 0.0:
                 self._next_camera_preview_time_s = self.sim_time + 1.0 / self.camera_preview_fps
@@ -3415,7 +3419,9 @@ class Example:
             default=-180.0,
             help="Dynamic bottle roll in scene frame [deg].",
         )
-        parser.add_argument("--bottle-pitch", type=float, default=0.0, help="Dynamic bottle pitch in scene frame [deg].")
+        parser.add_argument(
+            "--bottle-pitch", type=float, default=0.0, help="Dynamic bottle pitch in scene frame [deg]."
+        )
         parser.add_argument("--bottle-yaw", type=float, default=0.0, help="Dynamic bottle yaw in scene frame [deg].")
         parser.add_argument(
             "--viewer-camera-source",

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import json
 import os
-from math import sqrt
 import time
+from dataclasses import dataclass
+from math import sqrt
+from pathlib import Path
 
 import numpy as np
 
@@ -44,7 +44,7 @@ class OverlayHandLogSession:
         self._last_warn_time_s = 0.0
         self._frame_count = 0
 
-    def __enter__(self) -> "OverlayHandLogSession":
+    def __enter__(self) -> OverlayHandLogSession:
         self.robot.connect()
         try:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)

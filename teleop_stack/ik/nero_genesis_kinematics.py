@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
@@ -16,7 +16,6 @@ from teleop_stack.ik.so3 import (
     quat_normalize_xyzw,
 )
 from teleop_stack.models import Pose7
-
 
 NeroSide = Literal["left", "right"]
 
@@ -77,10 +76,7 @@ class GenesisLinkKinematicsModel:
             )
 
         self._set_joint_positions(q)
-        spatial: SpatialJacobian = tuple(
-            tuple(float(columns[col][row]) for col in range(7))
-            for row in range(6)
-        )  # type: ignore[assignment]
+        spatial: SpatialJacobian = tuple(tuple(float(columns[col][row]) for col in range(7)) for row in range(6))  # type: ignore[assignment]
         self._last_jacobian_q = q
         self._last_spatial_jacobian = spatial
         return spatial

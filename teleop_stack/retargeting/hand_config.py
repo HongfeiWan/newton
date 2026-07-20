@@ -1,18 +1,33 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-import xml.etree.ElementTree as ET
 
 from teleop_stack.models import NamedJointValues
 from teleop_stack.paths import resolve_linkerhand_l10_right_urdf
-
 
 LINKER_L10_NON_THUMB_MCP_PITCH_JOINT_NAMES: tuple[str, ...] = (
     "index_mcp_pitch",
     "middle_mcp_pitch",
     "ring_mcp_pitch",
     "pinky_mcp_pitch",
+)
+
+LINKER_L10_FINGERTIP_LINK_NAMES: tuple[str, ...] = (
+    "thumb_distal",
+    "index_distal",
+    "middle_distal",
+    "ring_distal",
+    "pinky_distal",
+)
+
+LINKER_L10_FINGERTIP_LOCAL_OFFSETS_M: tuple[tuple[float, float, float], ...] = (
+    (-0.008709782, -0.000085963, 0.026135302),
+    (-0.005600260, -0.000015293, 0.025815126),
+    (-0.005638273, -0.000015293, 0.025806858),
+    (-0.005600260, -0.000015293, 0.025815126),
+    (-0.005600260, -0.000015293, 0.025815126),
 )
 
 
@@ -180,13 +195,7 @@ def load_linker_l10_right_hand_spec(
         urdf_path=urdf_path,
         mesh_dir=mesh_dir,
         base_link_name="hand_base_link",
-        fingertip_link_names=(
-            "thumb_distal",
-            "index_distal",
-            "middle_distal",
-            "ring_distal",
-            "pinky_distal",
-        ),
+        fingertip_link_names=LINKER_L10_FINGERTIP_LINK_NAMES,
         active_joint_names=tuple(active_joint_names),
         active_joint_limits=tuple(active_joint_limits),
         mimic_joints=tuple(mimic_joints),

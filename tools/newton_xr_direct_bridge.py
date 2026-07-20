@@ -119,7 +119,7 @@ def _load_direct_gpu_modules() -> dict[str, Any]:
     ):
         try:
             modules[name] = __import__(name, fromlist=["*"])
-        except Exception as exc:  # noqa: BLE001 - report import failures cleanly to launcher.
+        except Exception as exc:
             missing.append(f"{name}: {exc}")
     if missing:
         joined = "\n  ".join(missing)
@@ -178,7 +178,7 @@ class NewtonXrBridge:
         assert self._app is not None
         try:
             self._app.run()
-        except Exception as exc:  # noqa: BLE001 - surface background XR failures.
+        except Exception as exc:
             print(f"[newton-xr-direct] error: XR Holoscan app stopped: {exc}", flush=True)
 
     def capture_viewer(self, viewer: Any) -> None:
@@ -197,8 +197,7 @@ class NewtonXrBridge:
         _, (width, height), resize_count = self._store.latest()
         if resize_count != self._last_resize_count:
             print(
-                "[newton-xr-direct] viewer frame size "
-                f"{width}x{height}; using actual GL capture size for XR plane.",
+                f"[newton-xr-direct] viewer frame size {width}x{height}; using actual GL capture size for XR plane.",
                 flush=True,
             )
             self._last_resize_count = resize_count

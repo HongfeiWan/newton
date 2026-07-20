@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-import sys
 
 from teleop_stack.models import ArmSide, Pose7, SingleArmTeleopCommand
 from teleop_stack.robots.base import RobotInterface
@@ -17,7 +17,6 @@ from teleop_stack.teleop.orientation_tracker import (
     QuaternionWXYZ,
     xyzw_to_wxyz,
 )
-
 
 AxisMap = tuple[str, str, str]
 

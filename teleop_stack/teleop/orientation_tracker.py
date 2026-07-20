@@ -14,7 +14,6 @@ from teleop_stack.ik.so3 import (
     quat_slerp_xyzw,
 )
 
-
 QuaternionWXYZ = tuple[float, float, float, float]
 AxisMap = tuple[str, str, str]
 Matrix3 = tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
@@ -49,11 +48,7 @@ def axis_map_matrix(axis_map: AxisMap) -> Matrix3:
 
 def matrix_det3(matrix: Matrix3) -> float:
     a, b, c = matrix
-    return (
-        a[0] * (b[1] * c[2] - b[2] * c[1])
-        - a[1] * (b[0] * c[2] - b[2] * c[0])
-        + a[2] * (b[0] * c[1] - b[1] * c[0])
-    )
+    return a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])
 
 
 def validate_rotation_axis_map(axis_map: AxisMap) -> Matrix3:
@@ -61,17 +56,13 @@ def validate_rotation_axis_map(axis_map: AxisMap) -> Matrix3:
     det = matrix_det3(matrix)
     if abs(det - 1.0) > 1e-9:
         raise ValueError(
-            "orientation axis map must be a proper right-handed rotation "
-            f"(det=+1), got det={det:.1f} for {axis_map!r}"
+            f"orientation axis map must be a proper right-handed rotation (det=+1), got det={det:.1f} for {axis_map!r}"
         )
     return matrix
 
 
 def _matmul(lhs: Matrix3, rhs: Matrix3) -> Matrix3:
-    return tuple(
-        tuple(sum(lhs[row][k] * rhs[k][col] for k in range(3)) for col in range(3))
-        for row in range(3)
-    )  # type: ignore[return-value]
+    return tuple(tuple(sum(lhs[row][k] * rhs[k][col] for k in range(3)) for col in range(3)) for row in range(3))  # type: ignore[return-value]
 
 
 def _transpose(matrix: Matrix3) -> Matrix3:
@@ -221,7 +212,9 @@ class OrientationTargetTracker:
             self._source_to_tool_matrix = _matrix_to_tuple(source_to_tool)
         return self._source_to_tool_matrix
 
-    def _target_delta(self, wrist_quat: QuaternionXYZW, axis_matrix: Matrix3) -> tuple[QuaternionXYZW, QuaternionXYZW, Matrix3 | None]:
+    def _target_delta(
+        self, wrist_quat: QuaternionXYZW, axis_matrix: Matrix3
+    ) -> tuple[QuaternionXYZW, QuaternionXYZW, Matrix3 | None]:
         assert self._anchor_wrist_quat_xyzw is not None
         assert self._anchor_ee_quat_xyzw is not None
         mode = self.config.reference_mode

@@ -184,19 +184,14 @@ class DifferentialIkController:
             for row_idx in range(3)
         )
         task_residual = tuple(
-            float(desired_task_delta[row_idx]) - float(achieved_task_delta[row_idx])
-            for row_idx in range(3)
+            float(desired_task_delta[row_idx]) - float(achieved_task_delta[row_idx]) for row_idx in range(3)
         )
         desired_task_delta_norm = math.sqrt(sum(value * value for value in desired_task_delta))
         task_residual_norm = math.sqrt(sum(value * value for value in task_residual))
 
         if singularity_metric <= float(self.config.singularity_hard_threshold):
             events.append("singularity_hard_zone")
-            residual_ratio = (
-                task_residual_norm / desired_task_delta_norm
-                if desired_task_delta_norm > 1e-9
-                else 0.0
-            )
+            residual_ratio = task_residual_norm / desired_task_delta_norm if desired_task_delta_norm > 1e-9 else 0.0
             if residual_ratio > float(self.config.singularity_hard_stop_residual_ratio):
                 if applied_dq_norm >= float(self.config.singularity_escape_min_joint_step_rad):
                     events.append("singularity_escape_step")
@@ -269,11 +264,15 @@ def _joint_limit_clamped_events(
 ) -> tuple[str, ...]:
     if lower_limits_rad is None or upper_limits_rad is None:
         return ()
-    if len(lower_limits_rad) != len(unclipped_joint_positions_rad) or len(upper_limits_rad) != len(unclipped_joint_positions_rad):
+    if len(lower_limits_rad) != len(unclipped_joint_positions_rad) or len(upper_limits_rad) != len(
+        unclipped_joint_positions_rad
+    ):
         return ()
 
     events: list[str] = []
-    for index, (unclipped, clipped) in enumerate(zip(unclipped_joint_positions_rad, clipped_joint_positions_rad, strict=True)):
+    for index, (unclipped, clipped) in enumerate(
+        zip(unclipped_joint_positions_rad, clipped_joint_positions_rad, strict=True)
+    ):
         if abs(float(unclipped) - float(clipped)) <= 1e-12:
             continue
         if float(unclipped) < float(lower_limits_rad[index]):

@@ -11,6 +11,7 @@ from .groot_residual_ppo import (
     compose_residual_action,
     compute_gae,
     normalize_physical_action,
+    validate_world_from_action_rotation,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "compose_residual_action",
     "compute_gae",
     "normalize_physical_action",
+    "validate_world_from_action_rotation",
 ]

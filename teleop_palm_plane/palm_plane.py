@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import acos, sin, sqrt
-from typing import Sequence
-
 
 QuaternionXYZW = tuple[float, float, float, float]
 QuaternionWXYZ = tuple[float, float, float, float]

@@ -16,6 +16,7 @@ _EEF_ROTATION_DIM = 6
 _HAND_ACTION_DIM = 10
 _PHYSICAL_ACTION_DIM = _EEF_POSITION_DIM + _EEF_ROTATION_DIM + _HAND_ACTION_DIM
 _RESIDUAL_ACTION_DIM = _EEF_POSITION_DIM + 3 + _HAND_ACTION_DIM
+_WORLD_FROM_ACTION_ROTATION_CACHE: dict[tuple[Any, ...], Any] = {}
 
 
 @dataclass(frozen=True)
@@ -24,12 +25,19 @@ class GrootResidualActorCriticConfig:
 
     ``condition_dim`` is the size of the frozen DP observation embedding. The
     actor receives that embedding followed by the normalized 19-D baseline
-    action. The critic receives the same policy input plus a privileged 20-D
-    task-state vector.
+    action, the normalized current 26-D robot state, an 8-D one-hot cached
+    action-row index, the live normalized 26-D state delta, and five live
+    finger-root motor loads. The critic receives the same policy input plus a
+    configured privileged task-state vector (20-D by default; trainers may
+    explicitly extend it when their checkpoint contract records that shape).
 
     Args:
         condition_dim: Frozen Diffusion Policy condition dimension.
         base_action_dim: Absolute EEF-pose and hand-target dimension.
+        current_state_dim: Current robot-state dimension.
+        base_action_row_dim: Number of cached DP rows encoded one-hot.
+        state_delta_dim: Live normalized robot-state delta dimension.
+        finger_root_load_dim: Number of live finger-root motor loads.
         privileged_dim: Critic-only task-state dimension.
         residual_dim: Raw Gaussian residual dimension.
         hidden_dim: Width of each actor and critic hidden layer.
@@ -38,6 +46,10 @@ class GrootResidualActorCriticConfig:
 
     condition_dim: int
     base_action_dim: int = 19
+    current_state_dim: int = 26
+    base_action_row_dim: int = 8
+    state_delta_dim: int = 26
+    finger_root_load_dim: int = 5
     privileged_dim: int = 20
     residual_dim: int = 16
     hidden_dim: int = 512
@@ -48,6 +60,14 @@ class GrootResidualActorCriticConfig:
             raise ValueError("condition_dim must be positive")
         if self.base_action_dim != _PHYSICAL_ACTION_DIM:
             raise ValueError(f"base_action_dim must be {_PHYSICAL_ACTION_DIM}")
+        if self.current_state_dim <= 0:
+            raise ValueError("current_state_dim must be positive")
+        if self.base_action_row_dim <= 0:
+            raise ValueError("base_action_row_dim must be positive")
+        if self.state_delta_dim != self.current_state_dim:
+            raise ValueError("state_delta_dim must equal current_state_dim")
+        if self.finger_root_load_dim != 5:
+            raise ValueError("finger_root_load_dim must be 5")
         if self.privileged_dim <= 0:
             raise ValueError("privileged_dim must be positive")
         if self.residual_dim != _RESIDUAL_ACTION_DIM:
@@ -59,9 +79,16 @@ class GrootResidualActorCriticConfig:
 
     @property
     def policy_input_dim(self) -> int:
-        """Actor input dimension: DP condition plus normalized base action."""
+        """Actor input dimension including all cached and live features."""
 
-        return self.condition_dim + self.base_action_dim
+        return (
+            self.condition_dim
+            + self.base_action_dim
+            + self.current_state_dim
+            + self.base_action_row_dim
+            + self.state_delta_dim
+            + self.finger_root_load_dim
+        )
 
 
 def _as_action_bound(value: Any, reference: Any, name: str) -> Any:
@@ -71,6 +98,27 @@ def _as_action_bound(value: Any, reference: Any, name: str) -> Any:
     if bound.shape[-1:] != (_PHYSICAL_ACTION_DIM,):
         raise ValueError(f"{name} must end in dimension {_PHYSICAL_ACTION_DIM}, got {tuple(bound.shape)}")
     return bound
+
+
+def _as_hand_residual_scale(value: Any, reference: Any) -> Any:
+    """Convert a scalar or per-joint hand scale without reallocating device tensors."""
+
+    import torch
+
+    scale = torch.as_tensor(value, dtype=reference.dtype, device=reference.device)
+    if scale.ndim == 0:
+        if scale.device.type == "cpu" and (not bool(torch.isfinite(scale)) or bool(scale < 0.0)):
+            raise ValueError("hand_scale_normalized must be finite and non-negative")
+        return scale
+    if scale.shape != (_HAND_ACTION_DIM,):
+        raise ValueError(
+            f"hand_scale_normalized must be a scalar or length-{_HAND_ACTION_DIM} vector, got {tuple(scale.shape)}"
+        )
+    # Trainer-owned CUDA vectors are validated once before upload. Validate
+    # host inputs here while avoiding a device synchronization in every step.
+    if scale.device.type == "cpu" and (not bool(torch.isfinite(scale).all()) or bool((scale < 0.0).any())):
+        raise ValueError("hand_scale_normalized must contain only finite non-negative values")
+    return scale
 
 
 def normalize_physical_action(action: Any, action_min: Any, action_max: Any) -> Any:
@@ -147,6 +195,60 @@ def _rotation_matrix_from_raw_axis_angle(raw_axis_angle: Any, scale_rad: float) 
     return identity + sine_ratio[..., None] * skew + cosine_ratio[..., None] * torch.matmul(skew, skew)
 
 
+def validate_world_from_action_rotation(rotation: Any | None, reference: Any) -> Any:
+    """Return a validated fixed rotation from action position to world XYZ.
+
+    Args:
+        rotation: A finite, orthonormal, right-handed 3-by-3 rotation. ``None``
+            selects identity for callers whose action position is already in
+            the world frame.
+        reference: Tensor providing the output device and floating-point dtype.
+
+    Returns:
+        The rotation as a tensor on the reference device.
+
+    Raises:
+        ValueError: If the supplied matrix is not a proper rotation.
+    """
+
+    import torch
+
+    if rotation is None:
+        return torch.eye(3, dtype=reference.dtype, device=reference.device)
+    is_tensor = torch.is_tensor(rotation)
+    validation_matrix = rotation.float() if is_tensor else torch.as_tensor(rotation, dtype=torch.float64)
+    if validation_matrix.shape != (3, 3):
+        raise ValueError(f"world_from_action_rotation must have shape (3, 3), got {tuple(validation_matrix.shape)}")
+    if not bool(torch.isfinite(validation_matrix).all()):
+        raise ValueError("world_from_action_rotation must contain only finite values")
+    identity = torch.eye(3, dtype=validation_matrix.dtype, device=validation_matrix.device)
+    if not bool(
+        torch.allclose(
+            validation_matrix.transpose(-1, -2) @ validation_matrix,
+            identity,
+            atol=1.0e-5,
+            rtol=1.0e-5,
+        )
+    ):
+        raise ValueError("world_from_action_rotation must be orthonormal")
+    determinant = torch.linalg.det(validation_matrix)
+    if not bool(torch.isclose(determinant, determinant.new_tensor(1.0), atol=1.0e-5, rtol=1.0e-5)):
+        raise ValueError("world_from_action_rotation must be right-handed with determinant +1")
+    if is_tensor:
+        return rotation.to(dtype=reference.dtype, device=reference.device)
+
+    # Trainer configs use immutable host values. Cache the tiny device tensor so
+    # frame validation never introduces a device-to-host synchronization in the
+    # rollout loop.
+    values = tuple(float(value) for value in validation_matrix.reshape(-1))
+    cache_key = (*values, reference.dtype, reference.device.type, reference.device.index)
+    matrix = _WORLD_FROM_ACTION_ROTATION_CACHE.get(cache_key)
+    if matrix is None:
+        matrix = validation_matrix.to(dtype=reference.dtype, device=reference.device)
+        _WORLD_FROM_ACTION_ROTATION_CACHE[cache_key] = matrix
+    return matrix
+
+
 def compose_residual_action(
     base_action: Any,
     raw_latent: Any,
@@ -154,13 +256,18 @@ def compose_residual_action(
     action_max: Any,
     *,
     position_scale_m: float = 0.02,
+    vertical_position_scale_m: float | None = None,
     rotation_scale_rad: float = math.radians(10.0),
-    hand_scale_normalized: float = 0.1,
+    hand_scale_normalized: Any = 0.1,
+    world_from_action_rotation: Any | None = None,
 ) -> Any:
     """Compose a bounded physical action from a DP baseline and PPO latent.
 
     The raw Gaussian latent is mapped as ``xyz[3] + axis-angle[3] + hand[10]``.
-    Translation uses a bounded physical offset. Rotation applies a bounded
+    The first three latent values always mean world-frame XYZ. Translation uses
+    bounded world-horizontal and world-vertical offsets, then rotates the
+    offset back into the action position frame before adding it to the DP
+    baseline and applying action-frame bounds. Rotation applies a bounded
     axis-angle in the EEF local frame by right-multiplying the baseline
     rotation. Hand offsets are applied in normalized action coordinates.
     Output rotation remains canonical row-first rot6d.
@@ -170,9 +277,15 @@ def compose_residual_action(
         raw_latent: Unsquashed Gaussian PPO sample with shape ``[..., 16]``.
         action_min: Broadcastable lower physical bounds with trailing size 19.
         action_max: Broadcastable upper physical bounds with trailing size 19.
-        position_scale_m: Maximum per-axis translation residual [m].
+        position_scale_m: Maximum x/y translation residual [m], and maximum z
+            residual when ``vertical_position_scale_m`` is ``None``.
+        vertical_position_scale_m: Maximum z translation residual [m].
         rotation_scale_rad: Maximum local residual rotation angle [rad].
-        hand_scale_normalized: Maximum per-joint offset in ``[-1, 1]`` units.
+        hand_scale_normalized: Maximum hand offset in ``[-1, 1]`` units,
+            supplied as either one scalar or a length-10 per-joint vector.
+        world_from_action_rotation: Fixed rotation satisfying
+            ``position_world = R @ position_action``. ``None`` selects
+            identity for backward-compatible generic use.
 
     Returns:
         Bounded physical actions with shape ``[..., 19]``.
@@ -186,13 +299,19 @@ def compose_residual_action(
         raise ValueError(f"raw_latent must end in dimension {_RESIDUAL_ACTION_DIM}, got {tuple(raw_latent.shape)}")
     if base_action.shape[:-1] != raw_latent.shape[:-1]:
         raise ValueError(f"base_action and raw_latent batch shapes differ: {base_action.shape} vs {raw_latent.shape}")
-    if position_scale_m < 0.0 or rotation_scale_rad < 0.0 or hand_scale_normalized < 0.0:
+    vertical_scale_m = position_scale_m if vertical_position_scale_m is None else vertical_position_scale_m
+    if min(position_scale_m, vertical_scale_m, rotation_scale_rad) < 0.0:
         raise ValueError("residual scales must be non-negative")
+    hand_scale = _as_hand_residual_scale(hand_scale_normalized, base_action)
 
     minimum = _as_action_bound(action_min, base_action, "action_min")
     maximum = _as_action_bound(action_max, base_action, "action_max")
 
-    position = base_action[..., :3] + position_scale_m * torch.tanh(raw_latent[..., :3])
+    rotation_world_from_action = validate_world_from_action_rotation(world_from_action_rotation, base_action)
+    position_scale = base_action.new_tensor((position_scale_m, position_scale_m, vertical_scale_m))
+    position_residual_world = position_scale * torch.tanh(raw_latent[..., :3])
+    position_residual_action = torch.matmul(position_residual_world, rotation_world_from_action)
+    position = base_action[..., :3] + position_residual_action
     position = torch.maximum(torch.minimum(position, maximum[..., :3]), minimum[..., :3])
 
     base_rotation = _row_first_rot6d_to_matrix(base_action[..., 3:9])
@@ -205,7 +324,7 @@ def compose_residual_action(
     hand_span = torch.clamp(hand_maximum - hand_minimum, min=1.0e-6)
     normalized_hand = 2.0 * (base_action[..., 9:19] - hand_minimum) / hand_span - 1.0
     normalized_hand = torch.clamp(
-        normalized_hand + hand_scale_normalized * torch.tanh(raw_latent[..., 6:16]),
+        normalized_hand + hand_scale * torch.tanh(raw_latent[..., 6:16]),
         -1.0,
         1.0,
     )

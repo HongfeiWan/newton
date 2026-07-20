@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 NERO_JOINT_LOWER_LIMITS_RAD: tuple[float, ...] = (
     -2.705261,
     -1.745330,

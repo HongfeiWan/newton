@@ -6,7 +6,6 @@ from typing import Literal
 from teleop_stack.devices.quest import QuestInputBundle
 from teleop_stack.models import ArmSide
 
-
 PoseInputMode = Literal["controller_abs", "hand_abs"]
 
 
@@ -20,7 +19,12 @@ class SingleArmPipelineConfig:
 
 
 def build_single_arm_pose_gripper_pipeline(input_bundle: QuestInputBundle, config: SingleArmPipelineConfig):
-    from isaacteleop.retargeters import GripperRetargeter, GripperRetargeterConfig, Se3AbsRetargeter, Se3RetargeterConfig
+    from isaacteleop.retargeters import (
+        GripperRetargeter,
+        GripperRetargeterConfig,
+        Se3AbsRetargeter,
+        Se3RetargeterConfig,
+    )
     from isaacteleop.retargeting_engine.deviceio_source_nodes import ControllersSource, HandsSource
     from isaacteleop.retargeting_engine.interface import OutputCombiner
 

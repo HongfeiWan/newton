@@ -17,20 +17,20 @@ import newton.examples
 try:
     from debug.scene_asset_physics.edit_dynamic_bottle_body import (
         DEFAULT_OUTPUT,
-        build_dynamic_bottle,
-        load_dynamic_bottle_spec,
         _rotation_from_euler_deg,
         _water_mass_for_cylinder,
         _wp_transform_from_pos_quat,
+        build_dynamic_bottle,
+        load_dynamic_bottle_spec,
     )
 except ModuleNotFoundError:
     from edit_dynamic_bottle_body import (
         DEFAULT_OUTPUT,
-        build_dynamic_bottle,
-        load_dynamic_bottle_spec,
         _rotation_from_euler_deg,
         _water_mass_for_cylinder,
         _wp_transform_from_pos_quat,
+        build_dynamic_bottle,
+        load_dynamic_bottle_spec,
     )
 
 
@@ -330,7 +330,9 @@ class Example:
         parser.add_argument("--substeps", type=int, default=8, help="Simulation substeps per frame.")
         parser.add_argument("--iterations", type=int, default=12, help="XPBD solver iterations.")
         parser.add_argument("--gravity", type=float, default=-9.81, help="Gravity acceleration along Z [m/s^2].")
-        parser.add_argument("--add-ground", action=argparse.BooleanOptionalAction, default=True, help="Add ground plane.")
+        parser.add_argument(
+            "--add-ground", action=argparse.BooleanOptionalAction, default=True, help="Add ground plane."
+        )
         parser.add_argument(
             "--place-on-ground",
             action=argparse.BooleanOptionalAction,

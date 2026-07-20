@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import json
 import time
-from typing import Literal
+from dataclasses import dataclass
+from pathlib import Path
 
 from teleop_palm_plane import apply_palm_plane_wrist_orientation_correction
 from teleop_stack.devices.quest import QuestInputConfig, build_quest_input_bundle
@@ -14,7 +13,11 @@ from teleop_stack.retargeting.converters import (
     optional_hand_debug_snapshot,
     session_result_to_single_arm_command,
 )
-from teleop_stack.retargeting.pipelines import PoseInputMode, SingleArmPipelineConfig, build_single_arm_pose_gripper_pipeline
+from teleop_stack.retargeting.pipelines import (
+    PoseInputMode,
+    SingleArmPipelineConfig,
+    build_single_arm_pose_gripper_pipeline,
+)
 from teleop_stack.robots.base import RobotInterface
 
 
@@ -118,7 +121,7 @@ class QuestRobotSession:
             )
         )
 
-    def __enter__(self) -> "QuestRobotSession":
+    def __enter__(self) -> QuestRobotSession:
         self.robot.connect()
         try:
             if self.config.teleop_trace_path:

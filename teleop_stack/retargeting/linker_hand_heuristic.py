@@ -8,7 +8,6 @@ import numpy as np
 from teleop_stack.models import NamedJointValues
 from teleop_stack.retargeting.hand_config import DexHandModelSpec, load_linker_l10_right_hand_spec
 
-
 try:
     from isaacteleop.retargeting_engine.tensor_types.indices import HandJointIndex
 except ModuleNotFoundError:
@@ -287,12 +286,16 @@ def retarget_openxr_joint_positions_to_linker_l10_right(
     if not np.any(palm_forward) or not np.any(palm_across) or not np.any(palm_normal):
         return hand_spec.default_open_pose
 
-    index_dir = _safe_normalize(_project_onto_plane(points[HandJointIndex.INDEX_INTERMEDIATE] - index_base, palm_normal))
+    index_dir = _safe_normalize(
+        _project_onto_plane(points[HandJointIndex.INDEX_INTERMEDIATE] - index_base, palm_normal)
+    )
     middle_dir = _safe_normalize(
         _project_onto_plane(points[HandJointIndex.MIDDLE_INTERMEDIATE] - middle_base, palm_normal)
     )
     ring_dir = _safe_normalize(_project_onto_plane(points[HandJointIndex.RING_INTERMEDIATE] - ring_base, palm_normal))
-    pinky_dir = _safe_normalize(_project_onto_plane(points[HandJointIndex.LITTLE_INTERMEDIATE] - pinky_base, palm_normal))
+    pinky_dir = _safe_normalize(
+        _project_onto_plane(points[HandJointIndex.LITTLE_INTERMEDIATE] - pinky_base, palm_normal)
+    )
     thumb_dir = _safe_normalize(_project_onto_plane(thumb_base - wrist, palm_normal))
 
     index_curl = _finger_curl_ratio(

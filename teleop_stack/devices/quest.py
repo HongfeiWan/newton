@@ -6,7 +6,6 @@ from typing import Any
 
 from teleop_stack.paths import resolve_isaac_teleop_root, resolve_plugin_root_dir
 
-
 DEFAULT_PLUGIN_NAME = "controller_synthetic_hands"
 DEFAULT_PLUGIN_ROOT_ID = "synthetic_hands"
 

@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from errno import EADDRINUSE
 from typing import Literal
 
-
 VoiceTeleopCommand = Literal[
     "engage",
     "clutch",

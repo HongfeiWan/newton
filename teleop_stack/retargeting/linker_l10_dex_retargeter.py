@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import os
+from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
 
 from teleop_stack.models import NamedJointValues
 from teleop_stack.retargeting.hand_config import (
+    LINKER_L10_FINGERTIP_LINK_NAMES,
+    LINKER_L10_FINGERTIP_LOCAL_OFFSETS_M,
     LINKER_L10_NON_THUMB_MCP_PITCH_JOINT_NAMES,
     DexHandModelSpec,
     linker_l10_full_open_pose,
@@ -41,8 +43,7 @@ class LinkerL10Retargeter(Protocol):
         *,
         joint_orientations_xyzw: np.ndarray | None = None,
         joint_valid: np.ndarray | None = None,
-    ) -> NamedJointValues:
-        ...
+    ) -> NamedJointValues: ...
 
 
 @dataclass(frozen=True)
@@ -226,14 +227,18 @@ class LinkerL10DexRetargeter:
         wrist = local_points[_WRIST_INDEX]
         return (local_points[list(_TIP_INDICES), :] - wrist[None, :]).astype(np.float32)
 
-    def _qpos_to_named_joint_values(self, qpos: np.ndarray, joint_names: tuple[str, ...] | list[str]) -> NamedJointValues:
+    def _qpos_to_named_joint_values(
+        self, qpos: np.ndarray, joint_names: tuple[str, ...] | list[str]
+    ) -> NamedJointValues:
         by_name = {str(name): float(value) for name, value in zip(joint_names, qpos, strict=True)}
         fallback_by_name = dict(
             zip(self.spec.default_open_pose.joint_names, self.spec.default_open_pose.joint_positions, strict=True)
         )
         return NamedJointValues(
             joint_names=self.spec.active_joint_names,
-            joint_positions=tuple(float(by_name.get(name, fallback_by_name[name])) for name in self.spec.active_joint_names),
+            joint_positions=tuple(
+                float(by_name.get(name, fallback_by_name[name])) for name in self.spec.active_joint_names
+            ),
         )
 
     def _fuse_thumb_orientation(
@@ -262,10 +267,9 @@ class LinkerL10DexRetargeter:
                 continue
             lower, upper = limits_by_name[joint_name]
             orientation_value = lower + float(ratio) * (upper - lower)
-            positions_by_name[joint_name] = (
-                (1.0 - orientation_weight) * positions_by_name[joint_name]
-                + orientation_weight * orientation_value
-            )
+            positions_by_name[joint_name] = (1.0 - orientation_weight) * positions_by_name[
+                joint_name
+            ] + orientation_weight * orientation_value
 
         return NamedJointValues(
             joint_names=result.joint_names,
@@ -372,11 +376,12 @@ class LinkerL10HoloLayeredRetargeter:
     )
     _PINCH_FINGER_LINK_NAMES = ("index_distal", "middle_distal", "ring_distal", "pinky_distal")
     _TIP_LINK_LOCAL_OFFSETS_M = {
-        "thumb_distal": np.array((-0.008709782, -0.000085963, 0.026135302), dtype=np.float64),
-        "index_distal": np.array((-0.005600260, -0.000015293, 0.025815126), dtype=np.float64),
-        "middle_distal": np.array((-0.005638273, -0.000015293, 0.025806858), dtype=np.float64),
-        "ring_distal": np.array((-0.005600260, -0.000015293, 0.025815126), dtype=np.float64),
-        "pinky_distal": np.array((-0.005600260, -0.000015293, 0.025815126), dtype=np.float64),
+        name: np.asarray(offset, dtype=np.float64)
+        for name, offset in zip(
+            LINKER_L10_FINGERTIP_LINK_NAMES,
+            LINKER_L10_FINGERTIP_LOCAL_OFFSETS_M,
+            strict=True,
+        )
     }
     _PINCH_BLEND_NEAR_M = 0.007
     _DEFAULT_PINCH_ACTIVATE_M = 0.015
@@ -621,7 +626,12 @@ class LinkerL10HoloLayeredRetargeter:
             )
             cost = float(objective(np.asarray(result.x, dtype=np.float64), seed_x0))
             if best is None or cost < best[0]:
-                best = (cost, np.asarray(result.x, dtype=np.float64), bool(result.success), int(getattr(result, "nit", 0)))
+                best = (
+                    cost,
+                    np.asarray(result.x, dtype=np.float64),
+                    bool(result.success),
+                    int(getattr(result, "nit", 0)),
+                )
         if best is None:
             raise RuntimeError("L10 holo_layered pinch IK did not run any initial guess")
 
@@ -673,10 +683,9 @@ class LinkerL10HoloLayeredRetargeter:
             if joint_name not in self.spec.active_joint_names:
                 continue
             joint_index = self.spec.active_joint_names.index(joint_name)
-            adjusted[joint_index] = (
-                (1.0 - full_open_alpha) * adjusted[joint_index]
-                + full_open_alpha * full_open_by_name[joint_name]
-            )
+            adjusted[joint_index] = (1.0 - full_open_alpha) * adjusted[
+                joint_index
+            ] + full_open_alpha * full_open_by_name[joint_name]
         if self._filtered_qpos is not None:
             self._filtered_qpos = adjusted.copy()
         return adjusted
@@ -731,9 +740,7 @@ class LinkerL10HoloLayeredRetargeter:
         pinch_target = 0.35 * weighted_pinched_thumb_target + 0.65 * nearest_pinched_thumb_target
 
         denom = self.pinch_activate_distance_m - self._PINCH_BLEND_NEAR_M
-        pinch_alpha = float(
-            np.clip((self.pinch_activate_distance_m - nearest_distance) / max(denom, 1e-6), 0.0, 1.0)
-        )
+        pinch_alpha = float(np.clip((self.pinch_activate_distance_m - nearest_distance) / max(denom, 1e-6), 0.0, 1.0))
         target = (1.0 - pinch_alpha) * base_target + pinch_alpha * pinch_target
         self._last_thumb_target_debug = {
             "target_tip_xyz": [float(value) for value in target],
@@ -988,8 +995,7 @@ def _load_l10_spec_for_limit_profile(limit_profile: str) -> DexHandModelSpec:
 
         return load_linker_l10_right_hand_spec(
             active_joint_limit_overrides={
-                joint.joint_name: (joint.lower_rad, joint.upper_rad)
-                for joint in L10_RIGHT_CALIBRATION
+                joint.joint_name: (joint.lower_rad, joint.upper_rad) for joint in L10_RIGHT_CALIBRATION
             }
         )
     return load_linker_l10_right_hand_spec()

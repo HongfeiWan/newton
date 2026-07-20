@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from teleop_stack.ik.differential_ik import TaskJacobian, solve_damped_least_squares_step
 from teleop_stack.ik.filters import clamp_vector_norm
 
-
 Vector3 = tuple[float, float, float]
 
 
@@ -44,8 +43,7 @@ def build_full_pose_task(
         w_rot * rotation_step[2],
     )
     weighted_jacobian: TaskJacobian = tuple(
-        _scale_row(row, w_pos if row_index < 3 else w_rot)
-        for row_index, row in enumerate(spatial_jacobian)
+        _scale_row(row, w_pos if row_index < 3 else w_rot) for row_index, row in enumerate(spatial_jacobian)
     )
     return FullPoseTask(task_delta=task_delta, weighted_jacobian=weighted_jacobian)
 

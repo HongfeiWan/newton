@@ -21,7 +21,6 @@ import numpy as np
 import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_URDF = REPO_ROOT / "assets" / "generated" / "dual_nero_linker_l10_combined.urdf"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "previews" / "l10_urdf_color_preview"

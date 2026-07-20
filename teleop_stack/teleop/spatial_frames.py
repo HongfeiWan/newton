@@ -13,7 +13,6 @@ from teleop_stack.ik.so3 import (
     quat_normalize_xyzw,
 )
 
-
 AxisName = Literal["x", "y", "z"]
 Vector3 = tuple[float, float, float]
 Matrix3 = tuple[Vector3, Vector3, Vector3]
@@ -61,9 +60,7 @@ class HandAnatomicalFrame:
             "handedness_det": float(self.handedness_det),
             "thumb_alignment": float(self.thumb_alignment),
             "legacy_palm_normal_alignment": (
-                float(self.legacy_palm_normal_alignment)
-                if self.legacy_palm_normal_alignment is not None
-                else None
+                float(self.legacy_palm_normal_alignment) if self.legacy_palm_normal_alignment is not None else None
             ),
             "construction": self.construction,
         }
@@ -208,11 +205,7 @@ def matrix_from_axes(axes: FrameAxes) -> Matrix3:
 
 def matrix_det(matrix: Matrix3) -> float:
     a, b, c = matrix
-    return (
-        a[0] * (b[1] * c[2] - b[2] * c[1])
-        - a[1] * (b[0] * c[2] - b[2] * c[0])
-        + a[2] * (b[0] * c[1] - b[1] * c[0])
-    )
+    return a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])
 
 
 def _joint_index_by_name(hand_debug: dict[str, Any]) -> dict[str, int]:

@@ -48,10 +48,6 @@ from teleop_stack.ik import (  # noqa: E402
 from teleop_stack.ik.nero_can_fk import nero_can_flange_pose_from_joints  # noqa: E402
 from teleop_stack.models import NamedJointValues, Pose7  # noqa: E402
 from teleop_stack.policies.groot_rotation_contract import (  # noqa: E402
-    GROOT_ROW_MAJOR_FIRST_TWO_ROWS,
-    LEGACY_FIRST_TWO_COLUMNS_COLUMN_MAJOR,
-    ROT6D_CONVERSION_ALGORITHM,
-    convert_eef_9d_rotation,
     row_first_rot6d_to_matrix,
 )
 from teleop_stack.retargeting.hand_config import load_linker_l10_right_hand_spec  # noqa: E402
@@ -692,13 +688,13 @@ def _initialize_right_hand_pose(example: scene_runtime.Example, command_q: tuple
     example.state_1.assign(example.state_0)
 
     if hasattr(example, "_initial_joint_q"):
-        example._initial_joint_q = joint_q.copy()  # noqa: SLF001
+        example._initial_joint_q = joint_q.copy()
     if hasattr(example, "_initial_joint_target_q"):
-        example._initial_joint_target_q = joint_target_q.copy()  # noqa: SLF001
+        example._initial_joint_target_q = joint_target_q.copy()
     if hasattr(example, "_initial_body_q"):
-        example._initial_body_q = example.state_0.body_q.numpy().copy()  # noqa: SLF001
+        example._initial_body_q = example.state_0.body_q.numpy().copy()
     if hasattr(example, "_initial_model_body_q"):
-        example._initial_model_body_q = example.model.body_q.numpy().copy()  # noqa: SLF001
+        example._initial_model_body_q = example.model.body_q.numpy().copy()
     print(
         f"[groot-control] initialized right L10 hand from checkpoint pose joints={applied} "
         f"command={np.round(values, 6).tolist()}",
@@ -1863,7 +1859,7 @@ class GrootRtcExample(scene_runtime.Example):
         )
         if not self._sim_ego_preprocess_logged:
             source_height, source_width, _ = ego_source.shape
-            crop_rect = scene_runtime._roi_crop_rect(  # noqa: SLF001
+            crop_rect = scene_runtime._roi_crop_rect(
                 source_width,
                 source_height,
                 zoom=roi_zoom,

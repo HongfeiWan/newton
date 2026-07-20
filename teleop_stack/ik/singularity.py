@@ -49,7 +49,10 @@ def damping_scale_from_metric(
 def _task_gram_matrix(jacobian: PositionJacobian) -> tuple[tuple[float, float, float], ...]:
     return tuple(
         tuple(
-            sum(float(jacobian[row_idx][col_idx]) * float(jacobian[other_row_idx][col_idx]) for col_idx in range(len(jacobian[0])))
+            sum(
+                float(jacobian[row_idx][col_idx]) * float(jacobian[other_row_idx][col_idx])
+                for col_idx in range(len(jacobian[0]))
+            )
             for other_row_idx in range(3)
         )
         for row_idx in range(3)

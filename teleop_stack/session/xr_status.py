@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from teleop_stack.paths import resolve_cloudxr_env_path
 
@@ -164,17 +165,18 @@ class XrTeleopStatusPublisher:
             now_wall_s=now_wall,
         )
         serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        if not force and serialized == self._last_payload and (now_monotonic - self._last_write_monotonic_s) < self.heartbeat_s:
+        if (
+            not force
+            and serialized == self._last_payload
+            and (now_monotonic - self._last_write_monotonic_s) < self.heartbeat_s
+        ):
             return
         try:
             self._write_atomic(serialized)
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
             if error_text != self._write_error:
-                print(
-                    "[xr_status] publish_nonfatal_write_error "
-                    f"path={self.path} error={error_text}"
-                )
+                print(f"[xr_status] publish_nonfatal_write_error path={self.path} error={error_text}")
                 self._write_error = error_text
             return
         if self._write_error is not None:

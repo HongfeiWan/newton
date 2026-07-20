@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import inspect
 import importlib
+import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Protocol
+from typing import Literal, Protocol
 
 from teleop_stack.ik.differential_ik import (
     PositionJacobian,
@@ -13,7 +14,6 @@ from teleop_stack.ik.differential_ik import (
     SyntheticSevenDofPositionKinematics,
 )
 from teleop_stack.models import Pose7
-
 
 RokaeHostIkKinematicsBackend = Literal["synthetic", "rokae_model"]
 
@@ -72,7 +72,8 @@ def build_rokae_host_ik_kinematics(config: RokaeHostIkKinematicsConfig) -> Posit
     if config.backend == "rokae_model":
         return RokaeModelPositionKinematics(
             _load_rokae_model_api(
-                provider_spec=config.provider_spec or "teleop_stack.ik.rokae_model_provider:create_rokae_model_provider",
+                provider_spec=config.provider_spec
+                or "teleop_stack.ik.rokae_model_provider:create_rokae_model_provider",
                 provider_config=RokaeModelProviderConfig(
                     sdk_root=config.sdk_root,
                     xmate_type_name=config.xmate_type_name,
@@ -101,9 +102,7 @@ def _load_rokae_model_api(
 
     module_name, separator, callable_name = provider_spec.partition(":")
     if not separator or not module_name or not callable_name:
-        raise ValueError(
-            f"Invalid provider spec '{provider_spec}'. Expected format 'module.submodule:factory_name'."
-        )
+        raise ValueError(f"Invalid provider spec '{provider_spec}'. Expected format 'module.submodule:factory_name'.")
 
     try:
         module = importlib.import_module(module_name)
@@ -119,9 +118,7 @@ def _load_rokae_model_api(
             f"Rokae host IK provider spec '{provider_spec}' does not expose callable '{callable_name}'."
         ) from exc
     if not callable(factory):
-        raise RuntimeError(
-            f"Rokae host IK provider spec '{provider_spec}' resolved to a non-callable object."
-        )
+        raise RuntimeError(f"Rokae host IK provider spec '{provider_spec}' resolved to a non-callable object.")
 
     provider = _call_factory(factory, provider_config)
     _validate_provider(provider, provider_spec)

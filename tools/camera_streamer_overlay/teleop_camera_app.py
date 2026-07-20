@@ -128,9 +128,7 @@ def _promote_running_after_delay(delay_s: float, detail: str) -> threading.Timer
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Teleop Camera App: Multi-camera display for teleoperation"
-    )
+    parser = argparse.ArgumentParser(description="Teleop Camera App: Multi-camera display for teleoperation")
     parser.add_argument(
         "--config",
         type=str,
@@ -258,10 +256,7 @@ def main():
                 )
             if any(err in msg for err in xr_retry_errors):
                 _write_status("failed", f"xr_retries_exhausted={xr_recovery_count} message={msg}")
-                logger.error(
-                    "XR runtime recovery exhausted after "
-                    f"{xr_recovery_count} retry attempt(s): {msg}"
-                )
+                logger.error(f"XR runtime recovery exhausted after {xr_recovery_count} retry attempt(s): {msg}")
             else:
                 _write_status("failed", f"message={msg}")
             logger.error(f"Error: {e}")

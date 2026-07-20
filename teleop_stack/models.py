@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
-from typing import Iterable, Literal
-
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Literal
 
 ArmSide = Literal["left", "right"]
 
@@ -14,7 +14,7 @@ class Pose7:
     quaternion_xyzw: tuple[float, float, float, float]
 
     @classmethod
-    def from_iterable(cls, values: Iterable[float]) -> "Pose7":
+    def from_iterable(cls, values: Iterable[float]) -> Pose7:
         data = [float(v) for v in values]
         if len(data) != 7:
             raise ValueError(f"Expected 7 pose values, got {len(data)}")

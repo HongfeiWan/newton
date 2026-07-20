@@ -4,7 +4,6 @@ import argparse
 import shutil
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OVERLAY_ROOT = REPO_ROOT / "tools" / "overlay_assets" / "isaac_teleop_cloudxr"
 
@@ -12,8 +11,7 @@ OVERLAY_ROOT = REPO_ROOT / "tools" / "overlay_assets" / "isaac_teleop_cloudxr"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Apply teleop_stack-owned CloudXR web client and SDK script overlays "
-            "onto an IsaacTeleop checkout."
+            "Apply teleop_stack-owned CloudXR web client and SDK script overlays onto an IsaacTeleop checkout."
         )
     )
     parser.add_argument(
@@ -41,7 +39,7 @@ def patch_download_script(path: Path) -> None:
             "\n# Load CloudXR env defaults and local overrides when this script is run directly.\n"
             "# This keeps the script usable without requiring the caller to pre-export variables.\n"
             "# shellcheck disable=SC1091\n"
-            "source \"$GIT_ROOT/scripts/setup_cloudxr_env.sh\"\n"
+            'source "$GIT_ROOT/scripts/setup_cloudxr_env.sh"\n'
             "\n# Colors for output\n"
         ),
         path,
@@ -53,9 +51,7 @@ def patch_dockerfile_web_app(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
 
     legacy_npm_install = "  npm install --ignore-scripts ../sdk.tgz && npm install --ignore-scripts\n"
-    patched_npm_install = (
-        "  npm install --ignore-scripts --no-save ../sdk.tgz && npm install --ignore-scripts\n"
-    )
+    patched_npm_install = "  npm install --ignore-scripts --no-save ../sdk.tgz && npm install --ignore-scripts\n"
     if legacy_npm_install in text and patched_npm_install not in text:
         text = text.replace(legacy_npm_install, patched_npm_install, 1)
 
@@ -362,30 +358,9 @@ def main() -> int:
     patch_download_script(isaac_teleop_root / "scripts" / "download_cloudxr_sdk.sh")
     patch_download_script(isaac_teleop_root / "scripts" / "download_cloudxr_runtime_sdk.sh")
     patch_dockerfile_web_app(isaac_teleop_root / "deps" / "cloudxr" / "Dockerfile.web-app")
-    patch_device_profiles(
-        isaac_teleop_root
-        / "deps"
-        / "cloudxr"
-        / "webxr_client"
-        / "helpers"
-        / "DeviceProfiles.ts"
-    )
-    patch_index_html(
-        isaac_teleop_root
-        / "deps"
-        / "cloudxr"
-        / "webxr_client"
-        / "src"
-        / "index.html"
-    )
-    patch_app_tsx(
-        isaac_teleop_root
-        / "deps"
-        / "cloudxr"
-        / "webxr_client"
-        / "src"
-        / "App.tsx"
-    )
+    patch_device_profiles(isaac_teleop_root / "deps" / "cloudxr" / "webxr_client" / "helpers" / "DeviceProfiles.ts")
+    patch_index_html(isaac_teleop_root / "deps" / "cloudxr" / "webxr_client" / "src" / "index.html")
+    patch_app_tsx(isaac_teleop_root / "deps" / "cloudxr" / "webxr_client" / "src" / "App.tsx")
     copy_overlay_file("webxr_client/src/QuestVoiceCommandBridge.ts", isaac_teleop_root=isaac_teleop_root)
 
     print(f"Applied teleop_stack CloudXR overlay to {isaac_teleop_root}")

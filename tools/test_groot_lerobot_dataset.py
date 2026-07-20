@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as parquet
 
 from teleop_stack.datasets import GrootLeRobotWindowDataset, create_groot_lerobot_bc_split
-from teleop_stack.datasets.groot_lerobot import WRIST_KEY
+from teleop_stack.datasets.groot_lerobot import ACTION_KEY, EGO_KEY, STATE_KEY, WRIST_KEY
 
 
 def _episode(
@@ -201,6 +201,39 @@ class TestGrootLeRobotBCSplit(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "non-finite"):
                 create_groot_lerobot_bc_split(root, validation_fraction=0.5, split_seed=0)
+
+    def test_nonstatic_window_keeps_same_frame_then_next_frame_actions(self) -> None:
+        frame_count = 3
+        state = np.zeros((frame_count, 26), dtype=np.float32)
+        for frame_index, angle in enumerate((0.15, 0.35, 0.65)):
+            cosine = np.float32(np.cos(angle))
+            sine = np.float32(np.sin(angle))
+            state[frame_index, 7:10] = (0.25 + 0.01 * frame_index, -0.2, 0.5 + 0.02 * frame_index)
+            state[frame_index, 10:16] = (cosine, -sine, 0.0, sine, cosine, 0.0)
+            state[frame_index, 16:26] = np.linspace(
+                0.01 * frame_index,
+                0.2 + 0.01 * frame_index,
+                10,
+                dtype=np.float32,
+            )
+        action = np.concatenate((state[:, 7:16], state[:, 16:26]), axis=1)
+
+        dataset = GrootLeRobotWindowDataset.__new__(GrootLeRobotWindowDataset)
+        dataset.obs_horizon = 1
+        dataset.pred_horizon = frame_count
+        dataset.episodes = [{"episode_index": 0, "length": frame_count}]
+        dataset._samples = [(0, 0)]
+        dataset._numeric = [{STATE_KEY: state, ACTION_KEY: action}]
+        dataset._read_rgb_frames = lambda _episode, _key, indices: np.zeros((len(indices), 2, 2, 3), dtype=np.uint8)
+
+        sample = dataset[0]
+        sampled_action = sample[ACTION_KEY].numpy()
+        np.testing.assert_allclose(sampled_action[0], action[0], atol=0.0, rtol=0.0)
+        np.testing.assert_allclose(sampled_action[1], action[1], atol=0.0, rtol=0.0)
+        self.assertFalse(np.array_equal(sampled_action[0], sampled_action[1]))
+        np.testing.assert_allclose(sample[STATE_KEY][0, 7:16].numpy(), sampled_action[0, :9])
+        self.assertEqual(tuple(sample[EGO_KEY].shape), (1, 2, 2, 3))
+        self.assertEqual(tuple(sample[WRIST_KEY].shape), (1, 2, 2, 3))
 
 
 class TestGrootLeRobotFrameCache(unittest.TestCase):

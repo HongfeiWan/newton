@@ -11,12 +11,12 @@ def main() -> int:
     text = path.read_text(encoding="utf-8")
 
     marker = '    backend_uri = f"ws://{backend_host}:{backend_port}{path}"\n'
-    replacement = '''    if path.startswith("/quest-voice"):
+    replacement = """    if path.startswith("/quest-voice"):
         voice_backend_port = int(os.environ.get("TELEOP_QUEST_VOICE_BIND_PORT", "8766"))
         backend_uri = f"ws://127.0.0.1:{voice_backend_port}{path}"
     else:
         backend_uri = f"ws://{backend_host}:{backend_port}{path}"
-'''
+"""
     if replacement in text:
         print(f"cloudxr_wss_voice_route: already patched {path}")
         return 0

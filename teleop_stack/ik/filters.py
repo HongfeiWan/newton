@@ -29,10 +29,7 @@ def clamp_joint_step(
     if allowed_step <= 0.0:
         return tuple(0.0 for _ in joint_step_rad)
 
-    return tuple(
-        max(-allowed_step, min(allowed_step, float(value)))
-        for value in joint_step_rad
-    )
+    return tuple(max(-allowed_step, min(allowed_step, float(value))) for value in joint_step_rad)
 
 
 def clip_joint_positions(
@@ -44,7 +41,12 @@ def clip_joint_positions(
     dof = len(joint_positions_rad)
     if dof == 0:
         return (), False
-    if lower_limits_rad is None or upper_limits_rad is None or len(lower_limits_rad) != dof or len(upper_limits_rad) != dof:
+    if (
+        lower_limits_rad is None
+        or upper_limits_rad is None
+        or len(lower_limits_rad) != dof
+        or len(upper_limits_rad) != dof
+    ):
         return tuple(float(v) for v in joint_positions_rad), False
 
     clipped = False

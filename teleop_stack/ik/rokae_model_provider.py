@@ -10,7 +10,6 @@ from teleop_stack.ik.rokae_kinematics import RokaeModelApiLike, RokaeModelProvid
 from teleop_stack.models import Pose7
 from teleop_stack.paths import repo_root
 
-
 DEFAULT_MODEL_HELPER_BIN = repo_root() / "build" / "rokae_rci" / "rokae_rci_model_helper"
 DEFAULT_MODEL_HELPER_BUILD_SCRIPT = repo_root() / "scripts" / "build_rokae_rci_model_helper.sh"
 
@@ -101,11 +100,13 @@ class BuiltinRokaeModelProvider(RokaeModelApiLike):
         if DEFAULT_MODEL_HELPER_BIN.is_file():
             return DEFAULT_MODEL_HELPER_BIN.resolve()
 
-        build_script = Path(self.config.helper_build_script_path) if self.config.helper_build_script_path is not None else DEFAULT_MODEL_HELPER_BUILD_SCRIPT
+        build_script = (
+            Path(self.config.helper_build_script_path)
+            if self.config.helper_build_script_path is not None
+            else DEFAULT_MODEL_HELPER_BUILD_SCRIPT
+        )
         if not build_script.is_file():
-            raise FileNotFoundError(
-                f"Rokae model helper build script does not exist: {build_script}"
-            )
+            raise FileNotFoundError(f"Rokae model helper build script does not exist: {build_script}")
 
         env = os.environ.copy()
         if self.config.sdk_root is not None:
@@ -140,12 +141,15 @@ class BuiltinRokaeModelProvider(RokaeModelApiLike):
         if env_value:
             return env_value
         raise RuntimeError(
-            "Rokae model-backed host IK requires a robot IP. "
-            "Pass --rokae-host-ik-robot-ip or export ROKAE_ROBOT_IP."
+            "Rokae model-backed host IK requires a robot IP. Pass --rokae-host-ik-robot-ip or export ROKAE_ROBOT_IP."
         )
 
     def _query(self, joint_positions_rad: tuple[float, ...]) -> tuple[Pose7, PositionJacobian, SpatialJacobian | None]:
-        if self._cached_q == joint_positions_rad and self._cached_pose is not None and self._cached_jacobian is not None:
+        if (
+            self._cached_q == joint_positions_rad
+            and self._cached_pose is not None
+            and self._cached_jacobian is not None
+        ):
             return self._cached_pose, self._cached_jacobian, self._cached_spatial_jacobian
 
         process = self._require_process()
@@ -157,7 +161,9 @@ class BuiltinRokaeModelProvider(RokaeModelApiLike):
             process.stdin.write(query_line + "\n")
             process.stdin.flush()
         except BrokenPipeError as exc:
-            raise RuntimeError(self._build_helper_failure_message("helper subprocess closed stdin unexpectedly")) from exc
+            raise RuntimeError(
+                self._build_helper_failure_message("helper subprocess closed stdin unexpectedly")
+            ) from exc
 
         response_line = self._read_next_protocol_line(process)
 
@@ -177,7 +183,9 @@ class BuiltinRokaeModelProvider(RokaeModelApiLike):
             if not response_line:
                 self._finalize_process_on_stdout_eof(process)
                 suffix = f" Skipped stdout lines before EOF: {skipped_lines!r}" if skipped_lines else ""
-                raise RuntimeError(self._build_helper_failure_message(f"helper subprocess produced no response.{suffix}"))
+                raise RuntimeError(
+                    self._build_helper_failure_message(f"helper subprocess produced no response.{suffix}")
+                )
             if response_line.startswith("ok "):
                 return response_line
             stripped = response_line.strip()
@@ -208,10 +216,7 @@ class BuiltinRokaeModelProvider(RokaeModelApiLike):
     def _build_helper_failure_message(self, reason: str) -> str:
         stderr_tail = ""
         return_code = None
-        if (
-            self._process is not None
-            and self._process.stderr is not None
-        ):
+        if self._process is not None and self._process.stderr is not None:
             try:
                 return_code = self._process.poll()
                 if return_code is None:

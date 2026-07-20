@@ -53,7 +53,4 @@ def _fill_neutral_tuple(
     dof = len(lower_limits_rad)
     if neutral_positions_rad is not None and len(neutral_positions_rad) == dof:
         return tuple(float(v) for v in neutral_positions_rad)
-    return tuple(
-        0.5 * (float(lower_limits_rad[index]) + float(upper_limits_rad[index]))
-        for index in range(dof)
-    )
+    return tuple(0.5 * (float(lower_limits_rad[index]) + float(upper_limits_rad[index])) for index in range(dof))

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import wave
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from teleop_stack.session.voice_controls import VoiceTeleopCommand
 
@@ -242,9 +242,7 @@ class VoskVoiceCommandRecognizer:
             if handle.getsampwidth() != 2:
                 raise ValueError(f"Expected 16-bit wav, got sampwidth={handle.getsampwidth()}.")
             if handle.getframerate() != self.config.sample_rate_hz:
-                raise ValueError(
-                    f"Expected sample_rate={self.config.sample_rate_hz}, got {handle.getframerate()}."
-                )
+                raise ValueError(f"Expected sample_rate={self.config.sample_rate_hz}, got {handle.getframerate()}.")
 
             recognizer = self._build_recognizer()
             while True:

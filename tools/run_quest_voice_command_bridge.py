@@ -6,7 +6,6 @@ import os
 import sys
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -40,11 +39,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Streaming ASR backend. vosk preserves the existing chain; funasr uses paraformer streaming plus FSMN-VAD.",
     )
     parser.add_argument("--model-path", default=None, help="Path to the local Vosk model directory.")
-    parser.add_argument("--bind-host", default="127.0.0.1", help="Host interface to bind for the local Quest voice WS server.")
+    parser.add_argument(
+        "--bind-host", default="127.0.0.1", help="Host interface to bind for the local Quest voice WS server."
+    )
     parser.add_argument("--bind-port", type=int, default=8766, help="Local WS port for the Quest voice uplink bridge.")
-    parser.add_argument("--sample-rate", type=int, default=16000, help="PCM sample rate expected from the browser uplink.")
+    parser.add_argument(
+        "--sample-rate", type=int, default=16000, help="PCM sample rate expected from the browser uplink."
+    )
     parser.add_argument("--udp-host", default="127.0.0.1", help="Destination teleop voice UDP host.")
-    parser.add_argument("--udp-port", type=int, default=_default_voice_udp_port(), help="Destination teleop voice UDP port.")
+    parser.add_argument(
+        "--udp-port", type=int, default=_default_voice_udp_port(), help="Destination teleop voice UDP port."
+    )
     parser.add_argument("--cooldown-s", type=float, default=1.0, help="Minimum resend interval for the same command.")
     parser.add_argument(
         "--min-confidence",

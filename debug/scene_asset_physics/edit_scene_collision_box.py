@@ -415,7 +415,9 @@ class Example:
         parser.add_argument("--scene-glb", type=Path, default=DEFAULT_SCENE_GLB, help="Scene GLB visual asset.")
         parser.add_argument("--input", type=Path, default=None, help="Existing scene collision JSON to edit.")
         parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output scene collision JSON.")
-        parser.add_argument("--save-spec", action="store_true", help="Write the current spec immediately after startup.")
+        parser.add_argument(
+            "--save-spec", action="store_true", help="Write the current spec immediately after startup."
+        )
         parser.add_argument("--scene-pos-x", type=float, default=0.0, help="Scene visual X offset [m].")
         parser.add_argument("--scene-pos-y", type=float, default=-0.0184, help="Scene visual Y offset [m].")
         parser.add_argument("--scene-pos-z", type=float, default=0.129, help="Scene visual Z offset [m].")
@@ -434,7 +436,12 @@ class Example:
         parser.add_argument("--box-pitch", type=float, default=0.0, help="Box pitch in scene frame [deg].")
         parser.add_argument("--box-yaw", type=float, default=0.0, help="Box yaw in scene frame [deg].")
         parser.add_argument("--friction", type=float, default=10.0, help="Collision box friction coefficient.")
-        parser.add_argument("--box-visible", action=argparse.BooleanOptionalAction, default=False, help="Save box as visible in the runtime model.")
+        parser.add_argument(
+            "--box-visible",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Save box as visible in the runtime model.",
+        )
         parser.add_argument("--fps", type=float, default=60.0, help="Viewer frame rate [Hz].")
         return parser
 

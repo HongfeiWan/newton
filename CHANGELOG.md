@@ -16,6 +16,7 @@
 - Add `SensorTiledCamera.utils.assign_checkerboard_material(shape_indices=...)` for applying the checkerboard texture to selected shapes.
 - Add a GPU-batched Nero + L10 PickBottle environment and dual-camera Diffusion Policy trainer using the existing 26-D LeRobot state, 19-D absolute EEF/hand action, CUDA IK, partial reset, and action-chunk interfaces.
 - Add a residual PPO trainer that freezes the Nero + L10 Diffusion Policy, learns bounded position/SO(3)/hand corrections from staged rewards, and uses GPU privileged task state only in the critic.
+- Add optional per-coordinate thumb residual scales to Nero + L10 residual PPO, checkpoint the effective 10-joint GPU scale vector, and report thumb saturation, bound-clamp, and dynamic-rate-limit diagnostics.
 - Add `--render-fps` to cap example rendering rate without changing simulation frame timing
 - Expose `MeshAdjacencyData` (the device-resident soft-mesh adjacency struct returned by `MeshAdjacency.to()`) as public API for use in custom Warp kernels
 - Add `ModelBuilder.BvhConfig` for selecting Warp BVH constructors during model finalization for mesh, Gaussian, and shape BVHs.
@@ -24,6 +25,9 @@
 
 - Allow standalone world-root joints to remain outside articulation metadata during `ModelBuilder.finalize()`; use `SolverXPBD`, `SolverSemiImplicit`, or `SolverMuJoCo`'s standalone-root fallback, or add the joints to an articulation for solvers that require reduced-coordinate articulation metadata.
 - Change the Nero + L10 PickBottle environment to use ManiSkill-style staged rewards and require a confirmed grasp, continuous-contact transfer, release, final-pose validation, and settling before success.
+- Change the Nero + L10 transfer reward to shape positive lift progress, penalize failed transfers, debounce releases for one control interval, and distinguish physical from contact-preserving maximum lift.
+- Change the Nero + L10 staged reward to separate approach, contact, lift, placement, and release incentives.
+- Change the Nero + L10 lift reward to continuously shape the contact-gated maximum height across the configured lift target and fail confirmed grasps that lose contact before a valid release.
 - Train the Nero + L10 Diffusion Policy only from successful, deduplicated clips, use raw-episode-grouped train/validation splits, prefer bounded mmap RGB frame caches over random H.264 seeks, and bound fallback decoder resources; use `dataset_split.json` to reproduce or audit a run.
 - Change the default CoACD convex decomposition threshold from `0.5` to `0.05` to match CoACD's default; pass `remeshing_kwargs={"threshold": 0.5}` to preserve the previous coarse decomposition.
 - **Breaking change (experimental `SolverVBD`):** VBD now interprets all damping coefficients as absolute physical units instead of dimensionless stiffness-relative (Rayleigh) multipliers (`D = kd · ke`). Existing `kd`-family values will produce different damping. Affected parameters: tetrahedral `k_damp` [Pa·s], `tri_kd`, spring `kd` [N·s/m], cable `stretch_damping` [N·s/m] and `bend_damping` [N·m·s/rad] in `add_joint_cable()`/`add_rod()`/`add_rod_graph()`, `joint_target_kd` and `joint_limit_kd` (including `JointDofConfig.limit_kd`), shape contact `kd`/`shape_material_kd` and `soft_contact_kd` [N·s/m], and `SolverVBD(rigid_joint_linear_kd=…, rigid_joint_angular_kd=…)`. To preserve previous behavior, set `kd_new = kd_old · k`, where `k` is the stiffness or penalty coefficient the value was previously paired with, and pass the product to the same field.
@@ -47,6 +51,16 @@
 ### Fixed
 
 - Fix USD joint `physics:collisionEnabled` import so joints with two explicit bodies honor authored collision behavior; joints to world continue to allow body/world collisions, and articulation-wide self-collision filtering remains additive.
+- Fix residual PPO to execute per-lane cached Diffusion Policy rows 0--7, invalidate only reset lanes, keep the actor's normalized base aligned with the executed row, collect exact unbiased evaluation quotas, enforce post-update KL diagnostics, and select useful best checkpoints when success rates tie.
+- Fix residual PPO lift learning by conditioning cached-row corrections on the live 26-D state and row index, using a separately bounded vertical residual, and logging physical and contact-preserving lift progress.
+- Fix residual PPO translation residuals and lift diagnostics to use world XYZ while preserving the frozen DP's right Nero/CAN action-position frame through an explicit checkpointed rotation.
+- Fix Nero + L10 hand control by synchronizing clamped mimic-follower PD targets with every active target on the GPU, reject pre-v7 residual checkpoints, and reserve `131,072` triangle pairs per environment in the PPO trainer.
+- Fix residual PPO grasp-to-lift observability by adding live state deltas and real-machine-aligned five-finger root actuator loads to the actor, with GPU load-quality diagnostics and reset-safe timing.
+- Fix the Nero + L10 grasp contract to require confirmed thumb-to-finger opposition initially, then accumulate carrying progress while any hand contact remains and authorize release from a valid contacted placement pose.
+- Fix the Nero + L10 approach reward with continuous, bottle-local radial thumb-to-finger opposition shaping, an 8 cm distance scale calibrated to the observed pre-contact thumb gap, and real-fingertip reach geometry below strict grasp, while keeping one-sided contacts below the grasp-stage reward.
+- Fix Nero + L10 unilateral-contact learning by replacing fixed partial-contact plateaus with GPU physics-frame missing-side geometry guidance, exposing its diagnostics, and adding normalized guidance only to the residual PPO critic.
+- Fix Nero + L10 sparse grasp learning with stage-overwrite non-thumb, thumb, and transient bilateral contact rewards that remain below confirmed opposition without changing strict transfer success.
+- Fix Nero + L10 lift baselines by settling the dynamic bottle once on the GPU and retaining only its free-joint pose as the full and partial reset default.
 - Fix the Nero + L10 Diffusion Policy rotation contract to use row-first flange poses, reject stale state-target datasets and checkpoints, and fingerprint numeric training data; retrain policies from physically migrated data.
 - Fix the batched Nero + L10 environment truncating mesh contact candidates by scaling its triangle-pair buffer with the replicated world count.
 - Fix `ViewerFile.is_running()` to return `False` after `ViewerFile.close()` so headless recording loops can terminate like interactive viewers. (#3094)

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import logging
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -14,7 +14,6 @@ from teleop_stack.retargeting.hand_config import (
     load_linker_l10_right_hand_spec,
 )
 from teleop_stack.retargeting.linker_hand_heuristic import _orientation_thumb_ratios
-
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +87,7 @@ class L10AdaptiveRetargeterConfig:
     pinch_d2_cm: tuple[float, float, float, float] = (5.0, 5.0, 5.0, 5.0)
     alpha_max: float = 0.8
     segment_scaling: dict[str, tuple[float, float, float]] = field(
-        default_factory=lambda: {name: (1.0, 1.0, 1.0) for name in _FINGER_NAMES}
+        default_factory=lambda: dict.fromkeys(_FINGER_NAMES, (1.0, 1.0, 1.0))
     )
 
 

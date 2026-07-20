@@ -707,7 +707,9 @@ class Example:
             help="Existing dynamic bottle JSON spec to edit. Defaults to --output if it already exists.",
         )
         parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output dynamic bottle JSON spec.")
-        parser.add_argument("--save-spec", action="store_true", help="Write the current spec immediately after startup.")
+        parser.add_argument(
+            "--save-spec", action="store_true", help="Write the current spec immediately after startup."
+        )
         parser.add_argument("--radius", type=_positive_float, default=None, help="Initial cylinder radius [m].")
         parser.add_argument("--height", type=_positive_float, default=None, help="Initial cylinder height [m].")
         parser.add_argument(
@@ -722,7 +724,9 @@ class Example:
             default=WATER_DENSITY_KG_PER_M3,
             help="Water cylinder density [kg/m^3].",
         )
-        parser.add_argument("--fit-margin", type=float, default=-0.001, help="Extra envelope margin around the GLB [m].")
+        parser.add_argument(
+            "--fit-margin", type=float, default=-0.001, help="Extra envelope margin around the GLB [m]."
+        )
         parser.add_argument("--pos-x", type=float, default=0.42, help="Initial body X position [m].")
         parser.add_argument("--pos-y", type=float, default=0.07, help="Initial body Y position [m].")
         parser.add_argument("--pos-z", type=float, default=-0.57, help="Initial body Z position [m].")
@@ -733,7 +737,9 @@ class Example:
         parser.add_argument("--friction", type=float, default=3.0, help="Cylinder collision friction coefficient.")
         parser.add_argument("--gravity", type=float, default=-9.81, help="Gravity acceleration along Z [m/s^2].")
         parser.add_argument("--fps", type=float, default=60.0, help="Viewer frame rate [Hz].")
-        parser.add_argument("--add-ground", action=argparse.BooleanOptionalAction, default=True, help="Add a ground plane.")
+        parser.add_argument(
+            "--add-ground", action=argparse.BooleanOptionalAction, default=True, help="Add a ground plane."
+        )
         return parser
 
 

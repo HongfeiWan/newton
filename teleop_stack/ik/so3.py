@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from math import acos, atan2, sin, sqrt
 
-
 QuaternionXYZW = tuple[float, float, float, float]
 Vector3 = tuple[float, float, float]
 

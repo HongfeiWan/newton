@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -382,9 +382,8 @@ def _l10_bottle_contact_stop_update_kernel(
             normal_norm = wp.length(normal_shape0_to_shape1)
             if normal_norm > 0.0:
                 normal_shape0_to_shape1 = normal_shape0_to_shape1 / normal_norm
-            separation_m = (
-                wp.dot(normal_shape0_to_shape1, support1_world - support0_world)
-                - (rigid_contact_margin0[contact_index] + rigid_contact_margin1[contact_index])
+            separation_m = wp.dot(normal_shape0_to_shape1, support1_world - support0_world) - (
+                rigid_contact_margin0[contact_index] + rigid_contact_margin1[contact_index]
             )
             penetration_m = wp.max(float(0.0), -separation_m)
             stop_metric_m = penetration_m
@@ -612,10 +611,7 @@ class NewtonLinkKinematicsModel:
                 )
             )
 
-        spatial: SpatialJacobian = tuple(
-            tuple(float(columns[col][row]) for col in range(7))
-            for row in range(6)
-        )  # type: ignore[assignment]
+        spatial: SpatialJacobian = tuple(tuple(float(columns[col][row]) for col in range(7)) for row in range(6))  # type: ignore[assignment]
         self._last_jacobian_q = q
         self._last_spatial_jacobian = spatial
         return spatial
@@ -738,8 +734,12 @@ class NewtonGpuFullPoseDlsStepSolver:
         dt_s: float = 0.0,
         write_joint_targets: int = 0,
     ) -> None:
-        target_joint_q = self._target_joint_q_wp if self._target_joint_q_wp is not None else self._dummy_target_joint_q_wp
-        target_joint_qd = self._target_joint_qd_wp if self._target_joint_qd_wp is not None else self._dummy_target_joint_qd_wp
+        target_joint_q = (
+            self._target_joint_q_wp if self._target_joint_q_wp is not None else self._dummy_target_joint_q_wp
+        )
+        target_joint_qd = (
+            self._target_joint_qd_wp if self._target_joint_qd_wp is not None else self._dummy_target_joint_qd_wp
+        )
         wp.launch(
             kernel=_full_pose_dls_solve_kernel,
             dim=1,
@@ -884,7 +884,11 @@ class NewtonGpuFullPoseDlsStepSolver:
             bias_step=bias_step,
         )
         self._current_q_host[:] = np.asarray(current_q, dtype=np.float32)
-        if not self._has_previous_velocity and previous_velocity_rad_s is not None and len(previous_velocity_rad_s) == 7:
+        if (
+            not self._has_previous_velocity
+            and previous_velocity_rad_s is not None
+            and len(previous_velocity_rad_s) == 7
+        ):
             self._last_dq_cmd_host[:] = np.asarray(previous_velocity_rad_s, dtype=np.float32)
             self._previous_velocity_wp.assign(self._last_dq_cmd_host)
             self._has_previous_velocity = True
@@ -1054,7 +1058,7 @@ def _postprocess_joint_step_host(
 
 
 class NewtonRuntimeRobotInterface(RobotInterface):
-    def __init__(self, example: "Example", config: NewtonRuntimeRobotConfig | None = None, *, print_every_n: int = 30):
+    def __init__(self, example: Example, config: NewtonRuntimeRobotConfig | None = None, *, print_every_n: int = 30):
         self.example = example
         self.config = config or NewtonRuntimeRobotConfig()
         self.print_every_n = max(1, int(print_every_n))
@@ -1439,7 +1443,8 @@ class NewtonRuntimeRobotInterface(RobotInterface):
             source_actual = str(source_debug.get("actual", "unknown"))
             if (
                 self._orientation_anchor_source_actual is not None
-                and source_actual in {"hand_anatomical_frame", "hand_beavr_anatomical_frame", "hand_genesis_wrist_frame"}
+                and source_actual
+                in {"hand_anatomical_frame", "hand_beavr_anatomical_frame", "hand_genesis_wrist_frame"}
                 and self._orientation_anchor_source_actual != source_actual
             ):
                 self.reset_relative_anchor()
@@ -1939,7 +1944,9 @@ class NewtonRuntimeRobotInterface(RobotInterface):
         if not np.isfinite(joint_q).all() or not np.isfinite(joint_qd).all():
             if self._target_joint_q_host is not None and np.isfinite(self._target_joint_q_host).all():
                 joint_q = self._target_joint_q_host.copy()
-                joint_qd = np.zeros_like(self._target_joint_qd_host) if self._target_joint_qd_host is not None else joint_qd
+                joint_qd = (
+                    np.zeros_like(self._target_joint_qd_host) if self._target_joint_qd_host is not None else joint_qd
+                )
             else:
                 raise ValueError("Newton live joint state is non-finite and no finite target fallback is available")
         self._joint_q_host = joint_q

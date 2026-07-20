@@ -6,7 +6,6 @@ from typing import Protocol
 
 from teleop_stack.models import Pose7
 
-
 TaskJacobian = tuple[tuple[float, ...], ...]
 PositionJacobian = tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]
 SpatialJacobian = tuple[
@@ -48,16 +47,8 @@ class SyntheticSevenDofPositionKinematics:
         theta2 = q1 + q2
         theta3 = q1 + q2 + q3
 
-        radial = (
-            l1 * math.cos(theta1)
-            + l2 * math.cos(theta2)
-            + l3 * math.cos(theta3)
-        )
-        vertical = (
-            l1 * math.sin(theta1)
-            + l2 * math.sin(theta2)
-            + l3 * math.sin(theta3)
-        )
+        radial = l1 * math.cos(theta1) + l2 * math.cos(theta2) + l3 * math.cos(theta3)
+        vertical = l1 * math.sin(theta1) + l2 * math.sin(theta2) + l3 * math.sin(theta3)
         cos_yaw = math.cos(q0)
         sin_yaw = math.sin(q0)
         x = self.base_position_xyz[0] + cos_yaw * radial
@@ -77,30 +68,12 @@ class SyntheticSevenDofPositionKinematics:
         cos_yaw = math.cos(q0)
         sin_yaw = math.sin(q0)
 
-        radial = (
-            l1 * math.cos(theta1)
-            + l2 * math.cos(theta2)
-            + l3 * math.cos(theta3)
-        )
-        radial_dq1 = (
-            -l1 * math.sin(theta1)
-            - l2 * math.sin(theta2)
-            - l3 * math.sin(theta3)
-        )
-        radial_dq2 = (
-            -l2 * math.sin(theta2)
-            - l3 * math.sin(theta3)
-        )
+        radial = l1 * math.cos(theta1) + l2 * math.cos(theta2) + l3 * math.cos(theta3)
+        radial_dq1 = -l1 * math.sin(theta1) - l2 * math.sin(theta2) - l3 * math.sin(theta3)
+        radial_dq2 = -l2 * math.sin(theta2) - l3 * math.sin(theta3)
         radial_dq3 = -l3 * math.sin(theta3)
-        vertical_dq1 = (
-            l1 * math.cos(theta1)
-            + l2 * math.cos(theta2)
-            + l3 * math.cos(theta3)
-        )
-        vertical_dq2 = (
-            l2 * math.cos(theta2)
-            + l3 * math.cos(theta3)
-        )
+        vertical_dq1 = l1 * math.cos(theta1) + l2 * math.cos(theta2) + l3 * math.cos(theta3)
+        vertical_dq2 = l2 * math.cos(theta2) + l3 * math.cos(theta3)
         vertical_dq3 = l3 * math.cos(theta3)
 
         return (
@@ -166,7 +139,9 @@ def solve_damped_least_squares_step(
     return _solve_positive_definite(tuple(tuple(v for v in row) for row in system), rhs)
 
 
-def _require_seven_dof(joint_positions_rad: tuple[float, ...]) -> tuple[float, float, float, float, float, float, float]:
+def _require_seven_dof(
+    joint_positions_rad: tuple[float, ...],
+) -> tuple[float, float, float, float, float, float, float]:
     if len(joint_positions_rad) != 7:
         raise ValueError(f"SyntheticSevenDofPositionKinematics expects 7 joints, got {len(joint_positions_rad)}.")
     return tuple(float(v) for v in joint_positions_rad)  # type: ignore[return-value]

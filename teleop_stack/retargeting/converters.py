@@ -9,7 +9,6 @@ import numpy as np
 from teleop_stack.models import ArmSide, GripperCommand, NamedJointValues, Pose7, SingleArmTeleopCommand
 from teleop_stack.retargeting.linker_l10_dex_retargeter import retarget_openxr_hand_to_linker_l10_right
 
-
 logger = logging.getLogger(__name__)
 _LINKER_HAND_SPEC_WARNING_EMITTED = False
 
@@ -176,6 +175,7 @@ def result_has_valid_hand_tracking(result: dict[str, Any]) -> bool:
         return False
     try:
         from isaacteleop.retargeting_engine.tensor_types.indices import HandInputIndex
+
         joint_valid = _tensor_value_to_numpy(hand_group[HandInputIndex.JOINT_VALID], dtype=np.uint8)
     except Exception:
         return False

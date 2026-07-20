@@ -12,9 +12,9 @@ from teleop_stack.ik.posture_bias import compute_posture_bias_step
 from teleop_stack.ik.singularity import damping_scale_from_metric, normalized_singularity_metric
 from teleop_stack.ik.so3 import (
     QuaternionXYZW,
-    quat_angle_between_xyzw,
     orientation_error_rotvec_xyzw,
     quat_align_hemisphere_xyzw,
+    quat_angle_between_xyzw,
     quat_normalize_xyzw,
     quat_slerp_xyzw,
 )
@@ -202,7 +202,8 @@ class FullPoseDifferentialIkController:
                 )
                 orientation_alignment_elapsed_s = max(
                     0.0,
-                    float(self._target.timestamp_s) - float(self._alignment_gate_start_timestamp_s or self._target.timestamp_s),
+                    float(self._target.timestamp_s)
+                    - float(self._alignment_gate_start_timestamp_s or self._target.timestamp_s),
                 )
                 events.append("orientation_alignment_gate_active")
         target_quaternion = aligned_raw_target_quaternion
@@ -238,9 +239,8 @@ class FullPoseDifferentialIkController:
         orientation_error = orientation_error_rotvec_xyzw(target_quaternion, current_quaternion)
         orientation_error_norm = math.sqrt(sum(value * value for value in orientation_error))
 
-        ramp_finished = (
-            orientation_ramp_remaining_rad is None
-            or orientation_ramp_remaining_rad <= max(0.0, float(self.config.orientation_tolerance_rad))
+        ramp_finished = orientation_ramp_remaining_rad is None or orientation_ramp_remaining_rad <= max(
+            0.0, float(self.config.orientation_tolerance_rad)
         )
         if (
             bool(self.config.orientation_alignment_gate_enabled)
@@ -336,30 +336,30 @@ class FullPoseDifferentialIkController:
         )
         dls_solver = self.config.dls_step_solver
         joint_step_solver = (
-            dls_solver
-            if dls_solver is not None and hasattr(dls_solver, "solve_full_pose_joint_step")
-            else None
+            dls_solver if dls_solver is not None and hasattr(dls_solver, "solve_full_pose_joint_step") else None
         )
         if joint_step_solver is not None:
-            q_cmd, dq_cmd, unclipped_q_cmd, acceleration_limited, clipped = joint_step_solver.solve_full_pose_joint_step(
-                spatial_jacobian,
-                position_error_xyz=position_error,
-                orientation_error_rotvec=orientation_error,
-                damping_lambda=float(self.config.damping_lambda) * damping_scale,
-                position_weight=self.config.position_weight,
-                orientation_weight=self.config.orientation_weight,
-                max_position_step_m=self.config.max_task_step_m,
-                max_rotation_step_rad=self.config.max_rotation_step_rad,
-                bias_step=bias_step,
-                bias_weight=self.config.bias_weight,
-                current_q=current_q,
-                previous_velocity_rad_s=self._last_joint_velocity_rad_s,
-                lower_limits_rad=self.config.joint_lower_limits_rad,
-                upper_limits_rad=self.config.joint_upper_limits_rad,
-                max_joint_step_rad=self.config.max_joint_step_rad,
-                max_joint_velocity_rad_s=self.config.max_joint_velocity_rad_s,
-                max_joint_acceleration_rad_s2=self.config.max_joint_acceleration_rad_s2,
-                dt_s=dt_s,
+            q_cmd, dq_cmd, unclipped_q_cmd, acceleration_limited, clipped = (
+                joint_step_solver.solve_full_pose_joint_step(
+                    spatial_jacobian,
+                    position_error_xyz=position_error,
+                    orientation_error_rotvec=orientation_error,
+                    damping_lambda=float(self.config.damping_lambda) * damping_scale,
+                    position_weight=self.config.position_weight,
+                    orientation_weight=self.config.orientation_weight,
+                    max_position_step_m=self.config.max_task_step_m,
+                    max_rotation_step_rad=self.config.max_rotation_step_rad,
+                    bias_step=bias_step,
+                    bias_weight=self.config.bias_weight,
+                    current_q=current_q,
+                    previous_velocity_rad_s=self._last_joint_velocity_rad_s,
+                    lower_limits_rad=self.config.joint_lower_limits_rad,
+                    upper_limits_rad=self.config.joint_upper_limits_rad,
+                    max_joint_step_rad=self.config.max_joint_step_rad,
+                    max_joint_velocity_rad_s=self.config.max_joint_velocity_rad_s,
+                    max_joint_acceleration_rad_s2=self.config.max_joint_acceleration_rad_s2,
+                    dt_s=dt_s,
+                )
             )
             if acceleration_limited:
                 events.append("joint_acceleration_limited")
@@ -436,8 +436,7 @@ class FullPoseDifferentialIkController:
             for row_idx in range(6)
         )
         task_residual = tuple(
-            float(full_pose_task.task_delta[row_idx]) - float(achieved_task_delta[row_idx])
-            for row_idx in range(6)
+            float(full_pose_task.task_delta[row_idx]) - float(achieved_task_delta[row_idx]) for row_idx in range(6)
         )
         residual_position_error_m = _unweighted_norm(
             task_residual[:3],
@@ -452,11 +451,7 @@ class FullPoseDifferentialIkController:
 
         if singularity_metric <= float(self.config.singularity_hard_threshold):
             events.append("singularity_hard_zone")
-            residual_ratio = (
-                task_residual_norm / desired_task_delta_norm
-                if desired_task_delta_norm > 1e-9
-                else 0.0
-            )
+            residual_ratio = task_residual_norm / desired_task_delta_norm if desired_task_delta_norm > 1e-9 else 0.0
             if residual_ratio > float(self.config.singularity_hard_stop_residual_ratio):
                 if applied_dq_norm >= float(self.config.singularity_escape_min_joint_step_rad):
                     events.append("singularity_escape_step")

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
 import cupy as cp
-from holoscan.core import IOSpec, Operator, OperatorSpec
 import numpy as np
+from holoscan.core import IOSpec, Operator, OperatorSpec
 
 
 class FrameTapOp(Operator):
@@ -56,7 +56,11 @@ class FrameTapOp(Operator):
             op_output.emit(frame_dict, "frame_out")
             return
 
-        tensor_key = self._tensor_name if self._tensor_name and self._tensor_name in frame_dict else next(iter(frame_dict.keys()))
+        tensor_key = (
+            self._tensor_name
+            if self._tensor_name and self._tensor_name in frame_dict
+            else next(iter(frame_dict.keys()))
+        )
         frame = cp.asnumpy(frame_dict[tensor_key])
         if frame.ndim != 3 or frame.shape[2] < 3:
             op_output.emit(frame_dict, "frame_out")

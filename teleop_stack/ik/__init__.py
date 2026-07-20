@@ -1,7 +1,11 @@
 """Host-side IK and servo abstractions for real-robot teleoperation."""
 
 from teleop_stack.ik.controller import DifferentialIkController, DifferentialIkControllerConfig
-from teleop_stack.ik.differential_ik import PositionKinematicsModel, SpatialJacobian, SyntheticSevenDofPositionKinematics
+from teleop_stack.ik.differential_ik import (
+    PositionKinematicsModel,
+    SpatialJacobian,
+    SyntheticSevenDofPositionKinematics,
+)
 from teleop_stack.ik.full_pose import (
     FullPoseTask,
     build_full_pose_task,
@@ -25,10 +29,10 @@ from teleop_stack.ik.types import JointServoStepResult, RobotStateSnapshot, Task
 __all__ = [
     "DifferentialIkController",
     "DifferentialIkControllerConfig",
-    "FullPoseTask",
     "FullPoseDifferentialIkController",
     "FullPoseDifferentialIkControllerConfig",
     "FullPoseKinematicsModel",
+    "FullPoseTask",
     "JointServoStepResult",
     "PositionKinematicsModel",
     "RobotStateSnapshot",
