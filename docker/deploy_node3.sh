@@ -9,8 +9,6 @@ REMOTE_DIR="${REMOTE_DIR:-~/project/newton}"
 
 rsync -az --delete \
     --exclude .venv \
-    --exclude conda_envs \
-    --exclude conda_pkgs \
     --exclude docker/wheelhouse \
     "${REPO_DIR}/" "${REMOTE}:${REMOTE_DIR}/"
 

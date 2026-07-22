@@ -52,6 +52,7 @@
 ### Fixed
 
 - Fix USD joint `physics:collisionEnabled` import so joints with two explicit bodies honor authored collision behavior; joints to world continue to allow body/world collisions, and articulation-wide self-collision filtering remains additive.
+- Fix Newton GR00T launch scripts to discover the named Conda environment outside the repository instead of requiring repository-local environment and package-cache directories.
 - Fix residual PPO to execute per-lane cached Diffusion Policy rows 0--7, invalidate only reset lanes, keep the actor's normalized base aligned with the executed row, collect exact unbiased evaluation quotas, enforce post-update KL diagnostics, and select useful best checkpoints when success rates tie.
 - Fix residual PPO lift learning by conditioning cached-row corrections on the live 26-D state and row index, using a separately bounded vertical residual, and logging physical and contact-preserving lift progress.
 - Fix residual PPO translation residuals and lift diagnostics to use world XYZ while preserving the frozen DP's right Nero/CAN action-position frame through an explicit checkpointed rotation.

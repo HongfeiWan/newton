@@ -6,10 +6,8 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual Environments 
+# Virtual environments
 .venv
-conda_envs/
-conda_pkgs/
 activate_newton.sh
 
 # Tool cache

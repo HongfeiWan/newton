@@ -162,10 +162,12 @@ Build the GR00T inference layer on top of the existing direct-GPU image:
 docker/build_groot_rtc.sh
 ```
 
-On RTX 5090 hosts, `docker/run_groot_rtc.sh` automatically prefers the mounted
-`conda_envs/newton` Python runtime because its CUDA 12.8 PyTorch build includes
-`sm_120`. Set `NEWTON_GROOT_PYTHON` only when intentionally selecting another
-Python runtime inside the container.
+On RTX 5090 hosts, `docker/run_groot_rtc.sh` finds the named `newton` Conda
+environment, mounts it read-only from Conda's configured environment directory,
+and prefers its Python runtime because the CUDA 12.8 PyTorch build includes
+`sm_120`. Set `NEWTON_CONDA_ENV` to override the discovered environment path, or
+set `NEWTON_GROOT_PYTHON` only when intentionally selecting another Python
+runtime inside the container.
 
 Run with live Newton images on GPU 0:
 

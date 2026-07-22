@@ -1,8 +1,6 @@
 .git
 .claude
 .venv
-conda_envs
-conda_pkgs
 checkpoints
 local_data
 logs

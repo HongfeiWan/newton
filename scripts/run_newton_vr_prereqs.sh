@@ -153,16 +153,8 @@ shell_quote() {
 
 resolve_conda_env_python() {
     local env_name="$1"
-    local repo_env="${REPO_ROOT}/conda_envs/${env_name}/bin/python3"
-    if [[ -x "${repo_env}" ]]; then
-        printf '%s\n' "${repo_env}"
-        return 0
-    fi
-
-    local conda_base
-    conda_base="$(conda info --base 2>/dev/null || true)"
-    if [[ -n "${conda_base}" && -x "${conda_base}/envs/${env_name}/bin/python3" ]]; then
-        printf '%s\n' "${conda_base}/envs/${env_name}/bin/python3"
+    if [[ "${CONDA_DEFAULT_ENV:-}" == "${env_name}" && -x "${CONDA_PREFIX:-}/bin/python3" ]]; then
+        printf '%s\n' "${CONDA_PREFIX}/bin/python3"
         return 0
     fi
 

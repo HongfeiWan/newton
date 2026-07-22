@@ -16,9 +16,19 @@ INPUT_PREVIEW_WIDTH="${NEWTON_GROOT_INPUT_PREVIEW_WIDTH:-320}"
 RENDER_FPS="${NEWTON_GROOT_RENDER_FPS:-60}"
 ISAAC_GROOT_ROOT="${ISAAC_GROOT_ROOT:-${PROJECT_DIR}/Isaac-GR00T}"
 XAUTHORITY_PATH="${XAUTHORITY:-${HOME}/.Xauthority}"
-CONDA_PYTHON="${REPO_DIR}/conda_envs/newton/bin/python"
-if [[ -x "${CONDA_PYTHON}" ]]; then
-    PYTHON_BIN="${NEWTON_GROOT_PYTHON:-${CONDA_PYTHON}}"
+
+resolve_newton_conda_env() {
+    if [[ "${CONDA_DEFAULT_ENV:-}" == "newton" && -x "${CONDA_PREFIX:-}/bin/python" ]]; then
+        printf '%s\n' "${CONDA_PREFIX}"
+        return 0
+    fi
+    command -v conda >/dev/null 2>&1 || return 1
+    conda env list 2>/dev/null | awk '$1 == "newton" {print $NF; exit}'
+}
+
+NEWTON_CONDA_ENV="${NEWTON_CONDA_ENV:-$(resolve_newton_conda_env || true)}"
+if [[ -n "${NEWTON_CONDA_ENV}" && -x "${NEWTON_CONDA_ENV}/bin/python" ]]; then
+    PYTHON_BIN="${NEWTON_GROOT_PYTHON:-${NEWTON_CONDA_ENV}/bin/python}"
 else
     PYTHON_BIN="${NEWTON_GROOT_PYTHON:-/workspace/newton/.venv/bin/python}"
 fi
@@ -127,12 +137,14 @@ docker_args=(
     -e "NO_ALBUMENTATIONS_UPDATE=1"
     -e "PYTHONPATH=${REPO_DIR}:${ISAAC_GROOT_ROOT}:/workspace/newton:/camera_streamer:/camera_streamer/build"
     -v "${PROJECT_DIR}:${PROJECT_DIR}:rw"
-    -v "${REPO_DIR}/conda_envs/newton:${REPO_DIR}/conda_envs/newton:ro"
     -v "${HOME}/.cache:${HOME}/.cache:rw"
     -v /tmp/.X11-unix:/tmp/.X11-unix:rw
     -v /dev:/dev
     -w "${REPO_DIR}"
 )
+if [[ -n "${NEWTON_CONDA_ENV}" && -x "${NEWTON_CONDA_ENV}/bin/python" ]]; then
+    docker_args+=(-v "${NEWTON_CONDA_ENV}:${NEWTON_CONDA_ENV}:ro")
+fi
 
 python_args=(
     --device cuda:0
